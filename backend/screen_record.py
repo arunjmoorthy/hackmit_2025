@@ -155,24 +155,50 @@ class ScreenRecorder:
             raise RuntimeError("Recorder already running.")
         Path(self.out_path).parent.mkdir(parents=True, exist_ok=True)
         cmd = self._ffmpeg_cmd()
-        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE)
-        time.sleep(0.2)  # tiny warmup to avoid first-frame hiccup
+        # Capture stderr for debugging, discard stdout
+        self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+        time.sleep(0.4)  # tiny warmup to avoid first-frame hiccup
 
-    def stop(self, timeout=5):
+    def stop(self, timeout=8):
         if self.proc is None:
             return
         try:
             # Graceful stop so MP4 moov atom is written
-            self.proc.stdin.write(b"q")
-            self.proc.stdin.flush()
+            if self.proc.stdin:
+                try:
+                    self.proc.stdin.write(b"q")
+                    self.proc.stdin.flush()
+                except Exception:
+                    pass
+                try:
+                    self.proc.stdin.close()
+                except Exception:
+                    pass
         except Exception:
             pass
+        # Wait for graceful exit
         try:
             self.proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            self.proc.terminate()
             try:
-                self.proc.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                self.proc.kill()
+                # Try SIGINT for graceful finalize
+                self.proc.send_signal(subprocess.signal.SIGINT)
+                self.proc.wait(timeout=3)
+            except Exception:
+                try:
+                    self.proc.terminate()
+                    self.proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        self.proc.kill()
+                    except Exception:
+                        pass
+        # Optionally surface ffmpeg stderr on error
+        try:
+            if self.proc.returncode not in (0, None):
+                err = self.proc.stderr.read().decode("utf-8", errors="ignore") if self.proc.stderr else ""
+                if err:
+                    print("[ScreenRecorder] ffmpeg stderr:\n" + err)
+        except Exception:
+            pass
         self.proc = None

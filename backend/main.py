@@ -41,8 +41,8 @@ async def run(url: str):
 
     task = (
         f"Open https://github.com/. Wait until the page appears fully loaded. "
-        f"Sign in with email 'hacker41832@gmail.com' and password 'Hacker418'. "
-        f"Make a new repo with a random name. "
+        # f"Sign in with email 'hacker41832@gmail.com' and password 'Hacker418'. "
+        # f"Make a new repo with a random name. "
         f"Then respond 'done' and stop."
     )
 
@@ -54,7 +54,7 @@ async def run(url: str):
         enable_memory=False,
     )
 
-    rec = ScreenRecorder(out_path="artifacts/videos/demo_full.mp4", fps=30, display="auto", audio=None)
+    rec = ScreenRecorder(out_path="artifacts/videos/demo_full2.mp4", fps=30, display="auto", audio=None)
     rec.start()
 
     # 4) Run for a tiny number of steps so it navigates once and exits
@@ -205,6 +205,10 @@ async def create_demo_video_with_timestamps(url: str, description: str, output_d
         f"At each significant action, think concisely about what you are doing in one short sentence,"
         f" then proceed. Do not ask for further confirmation. When complete, respond 'done' and stop."
     )
+
+    # task = (
+    #     f"Open {url}. "
+    # )
 
     try:
         agent = Agent(

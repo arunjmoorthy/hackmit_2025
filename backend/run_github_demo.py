@@ -4,7 +4,8 @@ from pathlib import Path
 
 from main import create_demo_video_with_timestamps, _build_from_history_obj
 from screen_record import ScreenRecorder
-from trim_from_history import main as trim_video
+# from trim_from_history import main as trim_video
+from trim_from_history import jumpcut_video as trim_video
 
 URL = "github.com"
 DESCRIPTION = (
@@ -16,7 +17,7 @@ DESCRIPTION = (
 
 async def main() -> None:
     # 1) Start full-screen recorder (saved under artifacts/videos)
-    full_video = Path("artifacts/videos/demo_full.mp4")
+    full_video = Path("artifacts/videos/demo_full2.mp4")
     recorder = ScreenRecorder(out_path=str(full_video), fps=30, display="auto", audio=None)
     recorder.start()
 
@@ -58,17 +59,20 @@ async def main() -> None:
     print("Full screen recording:", full_video)
 
     # 5) Trim the video based on precise step start/end epoch times
-    trimmed_video = Path("artifacts/videos/demo_trimmed.mp4")
+    trimmed_video = Path("artifacts/videos/demo_trimmed2.mp4")
     warp_json = Path("artifacts/logs/timewarp.json")
     remapped_history_json = Path("artifacts/logs/agent_history_trimmed.json")
 
     try:
         trim_video(
-            history_json_path=str(history_file),
-            input_video_path=str(full_video),
-            output_video_path=str(trimmed_video),
-            warp_out_path=str(warp_json),
-            remapped_history_path=str(remapped_history_json),
+            # history_json_path=str(history_file),
+            input_path=str(full_video),
+            output_path=str(trimmed_video),
+            mode='cut',
+            still_min_seconds=3.0,
+            frame_step=10,
+            # warp_out_path=str(warp_json),
+            # remapped_history_path=str(remapped_history_json),
         )
     except Exception as e:
         print("Trimming failed:", e)

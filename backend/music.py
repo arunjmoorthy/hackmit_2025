@@ -168,7 +168,7 @@ def poll_clips(
 
 if __name__ == "__main__":
     prompt = "a song about the magic of HackMIT"
-    tags = "pop, upbeat"
+    tags = ""
     make_instrumental = True
 
     try:

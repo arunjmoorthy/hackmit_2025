@@ -8,7 +8,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
-from browser_use import Agent, ChatAnthropic
+# ✅ Correct public imports
+from browser_use import Agent, ChatAnthropic  # no BrowserConfig / LLMConfig
+from screen_record import ScreenRecorder
 
 """
 Usage:
@@ -37,16 +39,28 @@ async def run(url: str):
         f"Then respond 'done' and stop."
     )
 
+    task = (
+        f"Open https://github.com/. Wait until the page appears fully loaded. "
+        f"Sign in with email 'hacker41832@gmail.com' and password 'Hacker418'. "
+        f"Make a new repo with a random name. "
+        f"Then respond 'done' and stop."
+    )
+
     agent = Agent(
         task=task,
         llm=llm,
-        max_actions_per_step=1,
-        max_failures=1,
+        max_actions_per_step=5,
+        max_failures=3,
         enable_memory=False,
     )
 
+    rec = ScreenRecorder(out_path="artifacts/videos/demo_full.mp4", fps=30, display="auto", audio=None)
+    rec.start()
+
     # 4) Run for a tiny number of steps so it navigates once and exits
-    history = await agent.run(max_steps=2)
+    history = await agent.run(max_steps=50)
+
+    rec.stop()
 
     # 5) Optional: print visited URLs from the history object
     try:

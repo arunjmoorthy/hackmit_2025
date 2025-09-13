@@ -86,12 +86,22 @@ async def main() -> None:
         trim_video(
             input_path=str(full_video),
             output_path=str(trimmed_video),
+<<<<<<< Updated upstream
             mode='cut',
             still_min_seconds=3.0,
             frame_step=10,
             warp_out_path=str(warp_json),
             history_json_path=str(history_file),
             remapped_history_path=str(remapped_history_json),
+=======
+            mode='cap',
+            still_min_seconds=1.0,
+            cap_seconds=2.0,
+            frame_step=4,
+            diff_threshold=2,
+            # warp_out_path=str(warp_json),
+            # remapped_history_path=str(remapped_history_json),
+>>>>>>> Stashed changes
         )
     except Exception as e:
         print("Trimming failed:", e)

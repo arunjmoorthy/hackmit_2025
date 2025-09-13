@@ -24,11 +24,8 @@ What it does:
   - Captures a timeline of events with timestamps for later audio alignment
 """
 
-import logging
-import re
-
 async def run(url: str):
-    # 1) Load .env so ANTHROPIC_API_KEY is in the environment
+    # 1) Load .env so ANTHROPOPIC_API_KEY is in the environment
     load_dotenv()
 
     # 2) Choose a Claude model you have access to
@@ -58,138 +55,114 @@ async def run(url: str):
         pass
 
 
-class _EventCollector:
-    """Parses console/log lines into structured events with timestamps."""
-
-    step_re = re.compile(r"\bStep\s+(?P<idx>\d+):")
-    eval_re = re.compile(r"\bEval:\s*(?P<msg>.*)")
-    action_re = re.compile(r"\[ACTION[^\]]*\]\s*(?P<msg>.*)")
-
-    def __init__(self, epoch_started: float):
-        self.epoch_started = epoch_started
-        self.events: List[Dict[str, Any]] = []
-        self.current_step: Optional[int] = None
-
-    def _now_rel(self) -> float:
-        return max(0.0, time.time() - self.epoch_started)
-
-    def parse_line(self, line: str) -> Optional[Dict[str, Any]]:
-        message = line.rstrip("\n")
-        now_rel = round(self._now_rel(), 3)
-        event: Optional[Dict[str, Any]] = None
-
-        m_step = self.step_re.search(message)
-        if m_step:
+def _extract_item_summary(item: Dict[str, Any]) -> str:
+    """Create a concise description of a history item for narration."""
+    # Prefer model output text/thought
+    model_output = item.get("model_output") or item.get("assistant_output") or {}
+    if isinstance(model_output, dict):
+        for key in ("content", "text", "thought"):
+            if key in model_output and isinstance(model_output[key], str) and model_output[key].strip():
+                return model_output[key].strip()
+    # If action is present
+    action = item.get("action") or {}
+    if isinstance(action, dict):
+        name = action.get("name") or action.get("tool_name")
+        params = action.get("input") or action.get("params") or {}
+        if name:
             try:
-                self.current_step = int(m_step.group("idx"))
+                params_str = json.dumps(params, ensure_ascii=False) if params else ""
             except Exception:
-                self.current_step = None
-            event = {
-                "event_type": "step_start",
-                "step_index": self.current_step,
-                "message": message,
-                "t_rel_s": now_rel,
-            }
-        else:
-            m_eval = self.eval_re.search(message)
-            if m_eval:
-                event = {
-                    "event_type": "eval",
-                    "step_index": self.current_step,
-                    "message": m_eval.group("msg").strip(),
-                    "t_rel_s": now_rel,
-                }
-            else:
-                m_action = self.action_re.search(message)
-                if m_action:
-                    event = {
-                        "event_type": "action",
-                        "step_index": self.current_step,
-                        "message": m_action.group("msg").strip(),
-                        "t_rel_s": now_rel,
-                    }
-                else:
-                    if any(token in message for token in [
-                        "Navigated to", "Scrolled", "Clicked", "Searched", "waited", "Final Result", "Task completed"
-                    ]):
-                        event = {
-                            "event_type": "tool",
-                            "step_index": self.current_step,
-                            "message": message,
-                            "t_rel_s": now_rel,
-                        }
-                    elif any(token in message for token in ["ERROR", "WARNING"]):
-                        event = {
-                            "event_type": "log",
-                            "level": "ERROR" if "ERROR" in message else "WARNING",
-                            "step_index": self.current_step,
-                            "message": message,
-                            "t_rel_s": now_rel,
-                        }
-        if event:
-            self.events.append(event)
-        return event
+                params_str = str(params)
+            return f"Action: {name} {params_str}".strip()
+    # Observation / tool result
+    observation = item.get("observation") or {}
+    if isinstance(observation, dict):
+        for key in ("result", "text", "content", "status"):
+            if key in observation and isinstance(observation[key], str) and observation[key].strip():
+                return observation[key].strip()
+    # Fallback to type or stringified item
+    if isinstance(item.get("type"), str):
+        return f"Step type: {item['type']}"
+    return str(item)
 
 
-class AgentEventLogger(logging.Handler):
-    """Captures browser_use logs via logging module (if routed there)."""
-
-    def __init__(self, collector: _EventCollector):
-        super().__init__(level=logging.INFO)
-        self.collector = collector
-
-    def emit(self, record: logging.LogRecord) -> None:
+def _build_from_history_obj(history_obj: Any) -> Dict[str, Any]:
+    """Build events, step ranges, and timeline from AgentHistoryList using cumulative durations."""
+    # Access raw dict via pydantic model_dump if available
+    try:
+        history_dict = history_obj.model_dump()
+    except Exception:
         try:
-            self.collector.parse_line(record.getMessage())
+            history_dict = history_obj.dict()
         except Exception:
-            return
+            history_dict = {"history": []}
 
+    items: List[Dict[str, Any]] = []
+    try:
+        maybe_items = history_dict.get("history")
+        if isinstance(maybe_items, list):
+            items = [i if isinstance(i, dict) else {} for i in maybe_items]
+    except Exception:
+        items = []
 
-class _StreamCapture:
-    """File-like stream that forwards writes to the event collector with timestamps."""
+    events: List[Dict[str, Any]] = []
+    step_ranges: List[Dict[str, Any]] = []
+    timeline: List[Dict[str, Any]] = []
 
-    def __init__(self, underlying, collector: _EventCollector):
-        self._underlying = underlying
-        self._collector = collector
-        self._buffer = ""
-
-    def write(self, data: str) -> int:
-        # Mirror to original stream
+    t_cursor = 0.0
+    for idx, item in enumerate(items):
+        metadata = item.get("metadata") or {}
         try:
-            self._underlying.write(data)
+            duration = float(metadata.get("duration_seconds") or 0.0)
         except Exception:
-            pass
-        # Accumulate and parse per line
-        self._buffer += data
-        lines = self._buffer.split("\n")
-        self._buffer = lines.pop()  # keep trailing partial
-        for line in lines:
-            if line:
-                self._collector.parse_line(line)
-        return len(data)
+            duration = 0.0
+        start_s = round(t_cursor, 3)
+        end_s = round(t_cursor + max(0.0, duration), 3)
+        step_index = item.get("step_index")
+        if not isinstance(step_index, int):
+            step_index = idx + 1
 
-    def flush(self) -> None:
-        try:
-            self._underlying.flush()
-        except Exception:
-            pass
+        summary = _extract_item_summary(item)
 
-
-def _derive_step_ranges(events: List[Dict[str, Any]], duration_s: float) -> List[Dict[str, Any]]:
-    """Build [start, end) time ranges for each step based on step_start events."""
-    steps: List[Dict[str, Any]] = []
-    step_starts = [e for e in events if e.get("event_type") == "step_start" and isinstance(e.get("step_index"), int)]
-    step_starts.sort(key=lambda e: e["t_rel_s"])  # chronological
-    for i, e in enumerate(step_starts):
-        start = float(e["t_rel_s"])
-        end = float(step_starts[i + 1]["t_rel_s"]) if i + 1 < len(step_starts) else float(duration_s)
-        steps.append({
-            "step_index": int(e["step_index"]),
-            "start_s": round(start, 3),
-            "end_s": round(end, 3),
-            "duration_s": round(max(0.0, end - start), 3),
+        # Emit start/end events
+        events.append({
+            "event_type": "step_start",
+            "step_index": step_index,
+            "message": summary,
+            "t_rel_s": start_s,
         })
-    return steps
+        events.append({
+            "event_type": "step_end",
+            "step_index": step_index,
+            "message": summary,
+            "t_rel_s": end_s,
+        })
+
+        # Step range
+        step_ranges.append({
+            "step_index": step_index,
+            "start_s": start_s,
+            "end_s": end_s,
+            "duration_s": round(max(0.0, end_s - start_s), 3),
+            "summary": summary,
+        })
+
+        # Timeline thought/summary at step start
+        timeline.append({
+            "index": idx,
+            "t_rel_s": start_s,
+            "thought": summary,
+        })
+
+        t_cursor = end_s
+
+    return {
+        "events": events,
+        "step_ranges": step_ranges,
+        "timeline": timeline,
+        "total_duration_s": round(t_cursor, 3),
+        "raw": history_dict,
+    }
 
 
 async def create_demo_video_with_timestamps(url: str, description: str, output_dir: str = "artifacts") -> Dict[str, Any]:
@@ -197,7 +170,7 @@ async def create_demo_video_with_timestamps(url: str, description: str, output_d
     Runs a browser agent to perform actions on the given URL per the description,
     while attempting to record a screen video and capturing timestamped events.
 
-    Returns a dict with keys: video_path (if known), video_dir, timeline, events, step_ranges, started_at, ended_at, meta_path.
+    Returns a dict with keys: video_path (if known), video_dir, timeline, events, step_ranges, started_at, ended_at, meta_path, history_path.
     """
     load_dotenv()
 
@@ -244,78 +217,35 @@ async def create_demo_video_with_timestamps(url: str, description: str, output_d
     run_started = datetime.now(timezone.utc)
     epoch_started = time.time()
 
-    collector = _EventCollector(epoch_started)
-
-    # Attach both logging handler and stdout/stderr capture to be robust
-    event_handler = AgentEventLogger(collector)
-    root_logger = logging.getLogger()
-    root_original_level = root_logger.level
-    root_logger.setLevel(logging.INFO)
-    root_logger.addHandler(event_handler)
-
-    orig_stdout, orig_stderr = sys.stdout, sys.stderr
-    sys.stdout = _StreamCapture(orig_stdout, collector)  # type: ignore[assignment]
-    sys.stderr = _StreamCapture(orig_stderr, collector)  # type: ignore[assignment]
-
-    try:
-        history = await agent.run(max_steps=40)
-    finally:
-        # Restore streams and logging even if run fails
-        sys.stdout = orig_stdout  # type: ignore[assignment]
-        sys.stderr = orig_stderr  # type: ignore[assignment]
-        root_logger.removeHandler(event_handler)
-        root_logger.setLevel(root_original_level)
+    history = await agent.run(max_steps=40)
 
     run_ended = datetime.now(timezone.utc)
     epoch_ended = time.time()
 
-    timeline: List[Dict[str, Any]] = []
-
-    candidate_attrs = [
-        "events", "steps", "items", "records", "actions"
-    ]
-
-    extracted = False
-    for attr in candidate_attrs:
-        try:
-            seq = getattr(history, attr, None)
-            if not seq:
-                continue
-            for idx, item in enumerate(seq):
-                ts: Optional[float] = None
-                text: Optional[str] = None
+    # Persist full history as emitted by the library (for auditing/analysis)
+    history_path = logs_dir / f"agent_history_{timestamp_str}.json"
+    try:
+        # Prefer the library's own serializer
+        if hasattr(history, "save_to_file"):
+            history.save_to_file(history_path)
+        else:
+            # Fallback to dump model
+            try:
+                data = history.model_dump()
+            except Exception:
                 try:
-                    ts = getattr(item, "timestamp", None) or getattr(item, "ts", None) or getattr(item, "time", None)
+                    data = history.dict()
                 except Exception:
-                    ts = None
-                try:
-                    text = getattr(item, "content", None) or getattr(item, "text", None)
-                except Exception:
-                    text = None
-                if text is None:
-                    text = str(item)
-                if isinstance(ts, (int, float)):
-                    rel = max(0.0, float(ts) - float(epoch_started))
-                else:
-                    rel = collector.events[idx]["t_rel_s"] if idx < len(collector.events) else max(0.0, (time.time() - epoch_started))
-                timeline.append({
-                    "index": idx,
-                    "t_rel_s": round(rel, 3),
-                    "thought": text,
-                })
-            extracted = True
-            break
-        except Exception:
-            continue
+                    data = {}
+            with open(history_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception:
+        pass
 
-    if not extracted:
-        timeline = [
-            {"index": 0, "t_rel_s": 0.0, "thought": f"Started demo on {url}"},
-            {"index": 1, "t_rel_s": round(epoch_ended - epoch_started, 3), "thought": "Demo completed"},
-        ]
+    built = _build_from_history_obj(history)
 
-    duration_s = round(epoch_ended - epoch_started, 3)
-    step_ranges = _derive_step_ranges(collector.events, duration_s)
+    # If the library's computed total differs from wall clock, prefer library
+    duration_s = built.get("total_duration_s") or round(epoch_ended - epoch_started, 3)
 
     video_hint = str(videos_dir)
 
@@ -326,32 +256,35 @@ async def create_demo_video_with_timestamps(url: str, description: str, output_d
         "ended_at": run_ended.isoformat(),
         "duration_s": duration_s,
         "video_dir": video_hint,
-        "timeline": timeline,
-        "events": collector.events,
-        "step_ranges": step_ranges,
+        "timeline": built["timeline"],
+        "events": built["events"],
+        "step_ranges": built["step_ranges"],
+        "history_path": str(history_path),
     }
     meta_path = logs_dir / f"demo_meta_{timestamp_str}.json"
     with open(meta_path, "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
     print(f"\nSaved demo metadata: {meta_path}")
+    print(f"Full agent history: {history_path}")
     print(f"Video directory (if recorded): {video_hint}\n")
 
     return {
         "video_path": None,
         "video_dir": video_hint,
-        "timeline": timeline,
-        "events": collector.events,
-        "step_ranges": step_ranges,
+        "timeline": built["timeline"],
+        "events": built["events"],
+        "step_ranges": built["step_ranges"],
         "started_at": run_started.isoformat(),
         "ended_at": run_ended.isoformat(),
         "meta_path": str(meta_path),
+        "history_path": str(history_path),
     }
 
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Usage: python main.py <URL> [DESCRIPTION]")
+        print("Usage: python main.py <URL> [DESCRIPTION]\n        ")
         sys.exit(1)
 
     url_arg = sys.argv[1]

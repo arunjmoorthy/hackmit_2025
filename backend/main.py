@@ -8,16 +8,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 
-<<<<<<< HEAD
 # ✅ Correct public imports
 from browser_use import Agent, ChatAnthropic  # no BrowserConfig / LLMConfig
 from screen_record import ScreenRecorder
-
-claude_key = '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'
-
-=======
-from browser_use import Agent, ChatAnthropic
->>>>>>> 15493d5aa180324926215277f69c8ae4ee2cf5a6
 
 """
 Usage:
@@ -38,12 +31,7 @@ async def run(url: str):
     load_dotenv()
 
     # 2) Choose a Claude model you have access to
-<<<<<<< HEAD
-    #    See "Supported Models" in docs for current names.
-    llm = ChatAnthropic(model="claude-sonnet-4-0", api_key=claude_key)  # or "claude-3-5-sonnet-20240620"
-=======
     llm = ChatAnthropic(model="claude-sonnet-4-0")
->>>>>>> 15493d5aa180324926215277f69c8ae4ee2cf5a6
     
     # 3) Create a very explicit, single-step task and keep limits low
     task = (
@@ -66,24 +54,13 @@ async def run(url: str):
         enable_memory=False,
     )
 
-    rec = ScreenRecorder(out_path="runs/demo_full.mp4", fps=30, display="auto", audio=None)
+    rec = ScreenRecorder(out_path="artifacts/videos/demo_full.mp4", fps=30, display="auto", audio=None)
     rec.start()
 
     # 4) Run for a tiny number of steps so it navigates once and exits
     history = await agent.run(max_steps=50)
 
     rec.stop()
-
-    print(history)
-
-    for hist in history:
-        print(hist)
-        hist = hist[1]
-        for h in hist:
-            if h.metadata:
-                print(h.metadata)
-                print(h.metadata.duration_seconds)
-                # total += h.metadata.duration_seconds
 
     # 5) Optional: print visited URLs from the history object
     try:

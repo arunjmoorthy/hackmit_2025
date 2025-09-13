@@ -21,11 +21,11 @@ What it does:
   - Opens the provided URL
   - If description is provided: follows the description as steps
   - Attempts to record video via Playwright context if supported by library
-  - Captures a timeline of events with timestamps for later audio alignment
+  - Builds timestamps from agent history durations
 """
 
 async def run(url: str):
-    # 1) Load .env so ANTHROPOPIC_API_KEY is in the environment
+    # 1) Load .env so ANTHROPIC_API_KEY is in the environment
     load_dotenv()
 
     # 2) Choose a Claude model you have access to
@@ -57,13 +57,11 @@ async def run(url: str):
 
 def _extract_item_summary(item: Dict[str, Any]) -> str:
     """Create a concise description of a history item for narration."""
-    # Prefer model output text/thought
     model_output = item.get("model_output") or item.get("assistant_output") or {}
     if isinstance(model_output, dict):
         for key in ("content", "text", "thought"):
             if key in model_output and isinstance(model_output[key], str) and model_output[key].strip():
                 return model_output[key].strip()
-    # If action is present
     action = item.get("action") or {}
     if isinstance(action, dict):
         name = action.get("name") or action.get("tool_name")
@@ -74,13 +72,11 @@ def _extract_item_summary(item: Dict[str, Any]) -> str:
             except Exception:
                 params_str = str(params)
             return f"Action: {name} {params_str}".strip()
-    # Observation / tool result
     observation = item.get("observation") or {}
     if isinstance(observation, dict):
         for key in ("result", "text", "content", "status"):
             if key in observation and isinstance(observation[key], str) and observation[key].strip():
                 return observation[key].strip()
-    # Fallback to type or stringified item
     if isinstance(item.get("type"), str):
         return f"Step type: {item['type']}"
     return str(item)
@@ -88,14 +84,17 @@ def _extract_item_summary(item: Dict[str, Any]) -> str:
 
 def _build_from_history_obj(history_obj: Any) -> Dict[str, Any]:
     """Build events, step ranges, and timeline from AgentHistoryList using cumulative durations."""
-    # Access raw dict via pydantic model_dump if available
-    try:
-        history_dict = history_obj.model_dump()
-    except Exception:
+    # Accept either pydantic object or raw dict loaded from disk
+    if isinstance(history_obj, dict) and "history" in history_obj:
+        history_dict = history_obj
+    else:
         try:
-            history_dict = history_obj.dict()
+            history_dict = history_obj.model_dump()
         except Exception:
-            history_dict = {"history": []}
+            try:
+                history_dict = history_obj.dict()
+            except Exception:
+                history_dict = {"history": []}
 
     items: List[Dict[str, Any]] = []
     try:
@@ -124,7 +123,6 @@ def _build_from_history_obj(history_obj: Any) -> Dict[str, Any]:
 
         summary = _extract_item_summary(item)
 
-        # Emit start/end events
         events.append({
             "event_type": "step_start",
             "step_index": step_index,
@@ -138,7 +136,6 @@ def _build_from_history_obj(history_obj: Any) -> Dict[str, Any]:
             "t_rel_s": end_s,
         })
 
-        # Step range
         step_ranges.append({
             "step_index": step_index,
             "start_s": start_s,
@@ -147,7 +144,6 @@ def _build_from_history_obj(history_obj: Any) -> Dict[str, Any]:
             "summary": summary,
         })
 
-        # Timeline thought/summary at step start
         timeline.append({
             "index": idx,
             "t_rel_s": start_s,
@@ -168,9 +164,9 @@ def _build_from_history_obj(history_obj: Any) -> Dict[str, Any]:
 async def create_demo_video_with_timestamps(url: str, description: str, output_dir: str = "artifacts") -> Dict[str, Any]:
     """
     Runs a browser agent to perform actions on the given URL per the description,
-    while attempting to record a screen video and capturing timestamped events.
+    attempts to record a screen video, and saves the raw agent history JSON.
 
-    Returns a dict with keys: video_path (if known), video_dir, timeline, events, step_ranges, started_at, ended_at, meta_path, history_path.
+    Returns a dict with keys: video_dir, history_path, plus parsed events/step_ranges/timeline computed from in-memory history.
     """
     load_dotenv()
 
@@ -214,22 +210,14 @@ async def create_demo_video_with_timestamps(url: str, description: str, output_d
             enable_memory=False,
         )
 
-    run_started = datetime.now(timezone.utc)
-    epoch_started = time.time()
-
     history = await agent.run(max_steps=40)
-
-    run_ended = datetime.now(timezone.utc)
-    epoch_ended = time.time()
 
     # Persist full history as emitted by the library (for auditing/analysis)
     history_path = logs_dir / f"agent_history_{timestamp_str}.json"
     try:
-        # Prefer the library's own serializer
         if hasattr(history, "save_to_file"):
             history.save_to_file(history_path)
         else:
-            # Fallback to dump model
             try:
                 data = history.model_dump()
             except Exception:
@@ -244,41 +232,17 @@ async def create_demo_video_with_timestamps(url: str, description: str, output_d
 
     built = _build_from_history_obj(history)
 
-    # If the library's computed total differs from wall clock, prefer library
-    duration_s = built.get("total_duration_s") or round(epoch_ended - epoch_started, 3)
-
     video_hint = str(videos_dir)
 
-    meta = {
-        "url": url,
-        "description": description,
-        "started_at": run_started.isoformat(),
-        "ended_at": run_ended.isoformat(),
-        "duration_s": duration_s,
-        "video_dir": video_hint,
-        "timeline": built["timeline"],
-        "events": built["events"],
-        "step_ranges": built["step_ranges"],
-        "history_path": str(history_path),
-    }
-    meta_path = logs_dir / f"demo_meta_{timestamp_str}.json"
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-
-    print(f"\nSaved demo metadata: {meta_path}")
     print(f"Full agent history: {history_path}")
     print(f"Video directory (if recorded): {video_hint}\n")
 
     return {
-        "video_path": None,
         "video_dir": video_hint,
+        "history_path": str(history_path),
         "timeline": built["timeline"],
         "events": built["events"],
         "step_ranges": built["step_ranges"],
-        "started_at": run_started.isoformat(),
-        "ended_at": run_ended.isoformat(),
-        "meta_path": str(meta_path),
-        "history_path": str(history_path),
     }
 
 

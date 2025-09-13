@@ -1,247 +1,255 @@
-import json
-import math
+import os
 import subprocess
-import shlex
-from pathlib import Path
-from typing import List, Tuple, Dict
+import tempfile
+import math
+import cv2
+import numpy as np
+from tqdm import tqdm
 
-# ---------- CONFIG (tweak as needed) ----------
-IDLE_GAP_THRESHOLD_S = 2.0   # gaps >= this are considered downtime and removed
-LEAD_PAD_S = 0.20            # add context before each step window
-TAIL_PAD_S = 0.20            # add context after each step window
-MIN_KEEP_S = 0.50            # drop tiny keep windows under this length
-# ---------------------------------------------
+def get_video_duration(path: str) -> float:
+    """Return duration in seconds using ffprobe."""
+    cmd = [
+        "ffprobe", "-v", "error", "-select_streams", "v:0",
+        "-show_entries", "format=duration", "-of", "default=nw=1:nk=1", path
+    ]
+    out = subprocess.check_output(cmd).decode().strip()
+    return float(out)
 
-def load_history(path: Path) -> Dict:
-    return json.loads(path.read_text())
-
-def steps_to_windows(history: Dict) -> List[Tuple[float, float]]:
+def detect_stills(
+    path: str,
+    frame_step: int = 2,
+    diff_threshold: float = 1.0,
+    still_min_seconds: float = 3.0,
+):
     """
-    Returns list of (start_epoch, end_epoch) per step.
+    Detect intervals where consecutive frames are almost identical.
+    - frame_step: analyze every Nth frame for speed.
+    - diff_threshold: MSE threshold between gray frames; smaller = stricter (more "still").
+    - still_min_seconds: only mark runs at least this long as still.
+    Returns: list of (start_sec, end_sec) still intervals (merged, non-overlapping).
     """
-    wins = []
-    for item in history.get("history", []):
-        meta = item.get("metadata", {})
-        t0 = meta.get("step_start_time")
-        t1 = meta.get("step_end_time")
-        if t0 is None or t1 is None:
+    cap = cv2.VideoCapture(path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Could not open video: {path}")
+
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if fps <= 0 or total_frames <= 0:
+        raise RuntimeError("Could not read FPS or frame count.")
+
+    prev_gray = None
+    is_still_run = False
+    run_start_time = None
+    still_intervals = []
+
+    # Helper: mean squared error between frames
+    def mse(a, b):
+        diff = cv2.absdiff(a, b).astype(np.float32)
+        return float((diff * diff).mean())
+
+    # Iterate sampled frames
+    for idx in tqdm(range(0, total_frames, frame_step), desc="Scanning frames"):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+
+        if prev_gray is None:
+            prev_gray = gray
             continue
-        if t1 < t0:
-            t0, t1 = t1, t0
-        wins.append((float(t0), float(t1)))
-    return wins
 
-def normalize_to_video_clock(windows_epoch: List[Tuple[float, float]]) -> Tuple[List[Tuple[float, float]], float]:
-    """
-    Convert epoch windows to video-relative seconds: t' = t - first_step_start.
-    Returns (windows_video, video_t0_epoch)
-    """
-    if not windows_epoch:
-        return [], 0.0
-    t0 = windows_epoch[0][0]
-    converted = [(w0 - t0, w1 - t0) for (w0, w1) in windows_epoch]
-    return converted, t0
-
-def pad_and_merge(windows: List[Tuple[float, float]],
-                  lead_pad: float, tail_pad: float,
-                  idle_gap_threshold: float,
-                  min_keep: float) -> List[Tuple[float, float]]:
-    """
-    1) Expand each window by LEAD/Tail pads.
-    2) Merge adjacent windows if the gap between them is < idle_gap_threshold.
-    3) Drop tiny windows (< min_keep).
-    Assumes windows are in ascending order by start time.
-    """
-    if not windows:
-        return []
-
-    # pad
-    padded = [(max(0.0, s - lead_pad), e + tail_pad) for (s, e) in windows]
-
-    # merge
-    merged: List[Tuple[float, float]] = []
-    cs, ce = padded[0]
-    for (s, e) in padded[1:]:
-        gap = s - ce
-        if gap < idle_gap_threshold:
-            ce = max(ce, e)  # merge
+        d = mse(gray, prev_gray)
+        t = idx / fps
+        # Consider "still" if below threshold
+        if d < diff_threshold:
+            if not is_still_run:
+                is_still_run = True
+                run_start_time = t
         else:
-            if ce - cs >= min_keep:
-                merged.append((cs, ce))
-            cs, ce = s, e
-    if ce - cs >= min_keep:
-        merged.append((cs, ce))
+            if is_still_run:
+                run_end_time = t
+                if run_end_time - run_start_time >= still_min_seconds:
+                    still_intervals.append((run_start_time, run_end_time))
+                is_still_run = False
+            prev_gray = gray
 
+    # Close an open run at end
+    if is_still_run:
+        end_time = total_frames / fps
+        if end_time - run_start_time >= still_min_seconds:
+            still_intervals.append((run_start_time, end_time))
+
+    cap.release()
+
+    # Merge overlapping/adjacent intervals (robustness)
+    if not still_intervals:
+        return []
+    still_intervals.sort()
+    merged = [still_intervals[0]]
+    for s, e in still_intervals[1:]:
+        ls, le = merged[-1]
+        if s <= le + 1e-3:
+            merged[-1] = (ls, max(le, e))
+        else:
+            merged.append((s, e))
     return merged
 
-def build_timewarp(keep_intervals: List[Tuple[float, float]]) -> Dict:
+def invert_and_cap_intervals(
+    full_duration: float,
+    still_intervals: list,
+    cap_seconds: float | None = None,
+):
     """
-    Build piecewise linear mapping from original video time -> trimmed video time.
-    For each kept interval [a,b), it maps to [C, C + (b-a)), where C is cumulative.
-    Returns:
-        {
-          "pieces": [
-              {"src_start": a, "src_end": b, "dst_start": C},
-              ...
-          ],
-          "total_dst": last cumulative duration
-        }
+    Build 'keep' intervals from 0..duration given still_intervals.
+    - If cap_seconds is None: remove still intervals entirely.
+    - If cap_seconds is a float: retain the first cap_seconds inside each still interval.
+    Returns list of (start, end) intervals to keep, non-overlapping, sorted.
     """
-    pieces = []
-    cumulative = 0.0
-    for (a, b) in keep_intervals:
-        length = max(0.0, b - a)
-        pieces.append({"src_start": a, "src_end": b, "dst_start": cumulative})
-        cumulative += length
-    return {"pieces": pieces, "total_dst": cumulative}
+    keep = []
+    cursor = 0.0
+    for (s, e) in still_intervals:
+        # keep from cursor up to start of still
+        if s > cursor:
+            keep.append((cursor, s))
+        if cap_seconds is not None and cap_seconds > 0:
+            # keep first cap_seconds of the still run
+            keep.append((s, min(e, s + cap_seconds)))
+        cursor = e
+    if cursor < full_duration:
+        keep.append((cursor, full_duration))
 
-def warp_time(t: float, warp: Dict) -> float:
+    # Merge tiny gaps
+    merged = []
+    for seg in keep:
+        if not merged:
+            merged.append(seg)
+        else:
+            ps, pe = merged[-1]
+            cs, ce = seg
+            if cs <= pe + 1e-3:
+                merged[-1] = (ps, max(pe, ce))
+            else:
+                merged.append((cs, ce))
+    # Remove zero/negative spans
+    merged = [(s, e) for s, e in merged if e - s > 1e-3]
+    return merged
+
+def cut_with_ffmpeg(input_path: str, output_path: str, keep_segments: list, reencode=True):
     """
-    Map original time t (seconds since video start) to trimmed time using warp mapping.
-    If t is inside a removed gap, returns the next dst_start (i.e., snaps forward).
+    Cut the video to keep only keep_segments and concatenate.
+    Re-encodes segments for accurate, keyframe-independent cuts, then streams copy at concat.
     """
-    for p in warp["pieces"]:
-        a, b, C = p["src_start"], p["src_end"], p["dst_start"]
-        if a <= t < b:
-            return C + (t - a)
-    # if before first kept segment
-    if warp["pieces"]:
-        if t < warp["pieces"][0]["src_start"]:
-            return 0.0
-        # if after last kept segment, snap to end
-        last = warp["pieces"][-1]
-        return last["dst_start"] + (last["src_end"] - last["src_start"])
-    return t
+    if not keep_segments:
+        raise RuntimeError("No segments to keep; nothing to output.")
 
-def remap_history_times(history: Dict, video_t0_epoch: float, warp: Dict) -> Dict:
+    with tempfile.TemporaryDirectory() as tmp:
+        part_paths = []
+        for i, (s, e) in enumerate(keep_segments):
+            part = os.path.join(tmp, f"part_{i:04d}.mp4")
+            duration = max(0.0, e - s)
+            if duration <= 0:
+                continue
+            # Re-encode each piece for accuracy & concat-compatibility
+            cmd = [
+                "ffmpeg", "-y",
+                "-ss", f"{s:.3f}",
+                "-to", f"{e:.3f}",
+                "-i", input_path,
+                "-map", "0:v?", "-map", "0:a?",
+                "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
+                "-c:a", "aac", "-b:a", "160k",
+                "-movflags", "+faststart",
+                part
+            ]
+            subprocess.run(cmd, check=True)
+            part_paths.append(part)
+
+        # Concat
+        list_file = os.path.join(tmp, "list.txt")
+        with open(list_file, "w") as f:
+            for p in part_paths:
+                f.write(f"file '{p}'\n")
+
+        # Since parts match codecs, we can stream-copy on concat for speed.
+        cmd = [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0", "-i", list_file,
+            "-c", "copy",
+            output_path
+        ]
+        subprocess.run(cmd, check=True)
+    return output_path
+
+def jumpcut_video(
+    input_path: str,
+    output_path: str,
+    mode: str = "cap",          # "cap" or "cut"
+    cap_seconds: float = 2.0,   # used if mode == "cap"
+    still_min_seconds: float = 3.0,
+    frame_step: int = 2,
+    diff_threshold: float = 1.0,
+):
     """
-    Adds trimmed times for each step: 'trimmed_step_start', 'trimmed_step_end',
-    relative to the TRIMMED video timeline.
+    Main wrapper.
+    - mode="cut": drop still stretches >= still_min_seconds
+    - mode="cap": keep only first cap_seconds of each still stretch >= still_min_seconds
+    Tuning tips:
+      - Increase diff_threshold if it’s too aggressive (treats small motions as still).
+      - Increase still_min_seconds to ignore short pauses.
+      - Increase frame_step to scan faster; decrease for more precision.
     """
-    out = json.loads(json.dumps(history))  # deep copy
-    for item in out.get("history", []):
-        meta = item.get("metadata", {})
-        s_epoch = meta.get("step_start_time")
-        e_epoch = meta.get("step_end_time")
-        if s_epoch is None or e_epoch is None:
-            continue
-        # convert epoch -> original video time (seconds)
-        s0 = float(s_epoch) - video_t0_epoch
-        e0 = float(e_epoch) - video_t0_epoch
-        # warp into trimmed timeline
-        item.setdefault("metadata", {})
-        item["metadata"]["trimmed_step_start"] = round(warp_time(s0, warp), 3)
-        item["metadata"]["trimmed_step_end"] = round(warp_time(e0, warp), 3)
-    return out
+    duration = get_video_duration(input_path)
+    print(f"Duration: {duration:.2f}s")
 
-def _probe_has_audio(input_video: Path) -> bool:
-    """Return True if input has at least one audio stream."""
-    try:
-        cmd = f'ffprobe -v error -select_streams a -show_entries stream=index -of csv=p=0 "{input_video}"'
-        out = subprocess.check_output(shlex.split(cmd), stderr=subprocess.DEVNULL)
-        return bool(out.strip())
-    except Exception:
-        return False
-
-def write_ffmpeg_concat_command(input_video: Path, keep_intervals: List[Tuple[float, float]], output_video: Path) -> str:
-    """
-    Build a filter_complex command that:
-    - trims each [start,end) for video (and audio if present)
-    - concatenates them back-to-back with reset timestamps
-    Produces a single output: output_video
-    Returns the full command string (for logging); executes ffmpeg.
-    """
-    n = len(keep_intervals)
-    if n == 0:
-        raise RuntimeError("No keep intervals computed; nothing to output.")
-
-    has_audio = _probe_has_audio(input_video)
-
-    v_labels = []
-    filter_parts = []
-    for i, (start, end) in enumerate(keep_intervals):
-        v_lbl = f"v{i}"
-        v_labels.append(f"[{v_lbl}]")
-        start = max(0.0, start)
-        end = max(start, end)
-        filter_parts.append(f"[0:v]trim=start={start}:end={end},setpts=PTS-STARTPTS[{v_lbl}]")
-
-    if has_audio:
-        a_labels = []
-        for i, (start, end) in enumerate(keep_intervals):
-            a_lbl = f"a{i}"
-            a_labels.append(f"[{a_lbl}]")
-            start = max(0.0, start)
-            end = max(start, end)
-            filter_parts.append(f"[0:a]atrim=start={start}:end={end},asetpts=PTS-STARTPTS[{a_lbl}]")
-        v_concat_in = "".join(v_labels)
-        a_concat_in = "".join(a_labels)
-        filter_parts.append(f"{v_concat_in}concat=n={n}:v=1:a=0[vout]")
-        filter_parts.append(f"{a_concat_in}concat=n={n}:v=0:a=1[aout]")
-        map_args = ["-map", "[vout]", "-map", "[aout]"]
-    else:
-        v_concat_in = "".join(v_labels)
-        filter_parts.append(f"{v_concat_in}concat=n={n}:v=1:a=0[vout]")
-        map_args = ["-map", "[vout]"]
-
-    filter_complex = "; ".join(filter_parts)
-    cmd = [
-        "ffmpeg", "-y", "-i", str(input_video),
-        "-filter_complex", filter_complex,
-        *map_args,
-        "-c:v", "libx264", "-crf", "18", "-preset", "veryfast"
-    ]
-    if has_audio:
-        cmd += ["-c:a", "aac", "-b:a", "192k"]
-    cmd += [str(output_video)]
-
-    subprocess.run(cmd, check=True)
-    return " ".join(shlex.quote(x) for x in cmd)
-
-def main(history_json_path: str, input_video_path: str, output_video_path: str, warp_out_path: str, remapped_history_path: str):
-    history_path = Path(history_json_path)
-    video_in = Path(input_video_path)
-    video_out = Path(output_video_path)
-    warp_path = Path(warp_out_path)
-    remap_path = Path(remapped_history_path)
-
-    history = load_history(history_path)
-    step_windows_epoch = steps_to_windows(history)
-    if not step_windows_epoch:
-        raise RuntimeError("No steps with start/end times found in history.")
-
-    windows_video, video_t0_epoch = normalize_to_video_clock(step_windows_epoch)
-
-    # Merge steps into keep intervals (remove idle gaps)
-    keep = pad_and_merge(
-        windows_video,
-        lead_pad=LEAD_PAD_S,
-        tail_pad=TAIL_PAD_S,
-        idle_gap_threshold=IDLE_GAP_THRESHOLD_S,
-        min_keep=MIN_KEEP_S
+    stills = detect_stills(
+        input_path,
+        frame_step=frame_step,
+        diff_threshold=diff_threshold,
+        still_min_seconds=still_min_seconds,
     )
+    print(f"Detected {len(stills)} still intervals:")
+    for s, e in stills:
+        print(f"  still: {s:.2f}s → {e:.2f}s ({e - s:.2f}s)")
 
-    # Build time-warp mapping and save it
-    warp = build_timewarp(keep)
-    warp_path.write_text(json.dumps(warp, indent=2))
+    if mode == "cut":
+        keep = invert_and_cap_intervals(duration, stills, cap_seconds=None)
+    elif mode == "cap":
+        keep = invert_and_cap_intervals(duration, stills, cap_seconds=cap_seconds)
+    else:
+        raise ValueError("mode must be 'cut' or 'cap'")
 
-    # Remap the JSON history onto trimmed clock
-    remapped = remap_history_times(history, video_t0_epoch, warp)
-    remap_path.write_text(json.dumps(remapped, indent=2))
+    kept_total = sum(e - s for s, e in keep)
+    print(f"Keeping {len(keep)} segments, total {kept_total:.2f}s")
+    for s, e in keep:
+        print(f"  keep: {s:.2f}s → {e:.2f}s ({e - s:.2f}s)")
 
-    # Trim & concat with ffmpeg
-    cmd = write_ffmpeg_concat_command(video_in, keep, video_out)
-    print("FFmpeg command used:\n", cmd)
-    print(f"Kept {len(keep)} intervals; trimmed duration = {warp['total_dst']:.3f}s")
+    cut_with_ffmpeg(input_path, output_path, keep)
+    print(f"Done → {output_path}")
 
 if __name__ == "__main__":
+    # Example usage:
+    # jumpcut_video("input.mp4", "output_jumpcut.mp4",
+    #               mode="cap", cap_seconds=2.0,
+    #               still_min_seconds=5.0, frame_step=2, diff_threshold=1.0)
     import argparse
-    p = argparse.ArgumentParser(description="Trim screen recording using browser-use step times; output trimmed video + remapped timestamps.")
-    p.add_argument("--history", required=True, help="Path to JSON with top-level key 'history' (your pasted structure).")
-    p.add_argument("--video", required=True, help="Path to original screen recording (with audio if present).")
-    p.add_argument("--out", required=True, help="Path for trimmed mp4, e.g., video_trimmed.mp4")
-    p.add_argument("--warp_json", default="timewarp.json", help="Where to write the time-warp mapping JSON.")
-    p.add_argument("--remapped_history", default="history_trimmed.json", help="Where to write the remapped history JSON.")
+    p = argparse.ArgumentParser()
+    p.add_argument("--input")
+    p.add_argument("--output")
+    p.add_argument("--mode", choices=["cut", "cap"], default="cap")
+    p.add_argument("--cap_seconds", type=float, default=2.0)
+    p.add_argument("--still_min_seconds", type=float, default=5.0)
+    p.add_argument("--frame_step", type=int, default=2)
+    p.add_argument("--diff_threshold", type=float, default=1.0)
     args = p.parse_args()
 
-    main(args.history, args.video, args.out, args.warp_json, args.remapped_history)
+    jumpcut_video(
+        args.input,
+        args.output,
+        mode=args.mode,
+        cap_seconds=args.cap_seconds,
+        still_min_seconds=args.still_min_seconds,
+        frame_step=args.frame_step,
+        diff_threshold=args.diff_threshold,
+    )

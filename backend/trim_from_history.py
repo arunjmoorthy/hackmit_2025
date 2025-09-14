@@ -10,8 +10,8 @@ from typing import List, Tuple, Dict, Any, Optional
 
 # Tuning constants
 PRESERVE_STEP_WINDOWS = False  # Set True to force-keep full step windows (reduces trimming)
-KEEP_LEAD_PAD = 0.15          # seconds of context before each kept segment
-KEEP_TAIL_PAD = 0.15          # seconds of context after each kept segment
+KEEP_LEAD_PAD = 0.20          # add a bit more context before kept segments
+KEEP_TAIL_PAD = 0.20          # add a bit more context after kept segments
 
 def get_video_duration(path: str) -> float:
     """Return duration in seconds using ffprobe."""
@@ -502,16 +502,16 @@ def jumpcut_video(
         input_path,
         frame_step=frame_step,
         diff_threshold=diff_threshold,
-        still_min_seconds=still_min_seconds,
+        still_min_seconds=max(3.5, still_min_seconds),  # require slightly longer stillness
     )
     print(f"Detected {len(stills)} still intervals:")
     for s, e in stills:
         print(f"  still: {s:.2f}s → {e:.2f}s ({e - s:.2f}s)")
 
     if mode == "cut":
-        keep = invert_and_cap_intervals(duration, stills, cap_seconds=None)
+        keep = invert_and_cap_intervals(duration, stills, cap_seconds=0.6)  # keep a short glimpse of stills
     elif mode == "cap":
-        keep = invert_and_cap_intervals(duration, stills, cap_seconds=cap_seconds)
+        keep = invert_and_cap_intervals(duration, stills, cap_seconds=max(2.5, cap_seconds))
     else:
         raise ValueError("mode must be 'cut' or 'cap'")
 

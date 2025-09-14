@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import Snake from './components/Snake'
 import AudioRecorder from './components/AudioRecorder'
 
 type CompletePayload = {
@@ -27,6 +28,8 @@ export default function App() {
   const controllerRef = useRef<AbortController | null>(null)
   const resultRef = useRef<HTMLDivElement | null>(null)
   const [showModal, setShowModal] = useState(false)
+  const [showLogs, setShowLogs] = useState(false)
+  const [gameStarted, setGameStarted] = useState(false)
 
   const onRecorded = useCallback((blob: Blob | null) => {
     setAudioBlob(blob)
@@ -94,11 +97,15 @@ export default function App() {
               if (m.includes('Trimming the video')) setProgress(40)
               if (m.includes('Building transcript')) setProgress(60)
               if (m.includes('Synthesizing voiceover')) setProgress(80)
+            } else if (eventName === 'progress') {
+              const v = Number((payload.value ?? 0))
+              if (!Number.isNaN(v)) setProgress(Math.max(progress, Math.min(100, v)))
             } else if (eventName === 'error') {
               pushEvent('error', payload.message || JSON.stringify(payload))
             } else if (eventName === 'agent_done') {
               pushEvent('done', 'Agent completed')
               setProgress(30)
+              setGameStarted(true)
             } else if (eventName === 'trim_done') {
               pushEvent('done', 'Trim completed')
               setProgress(50)
@@ -202,22 +209,28 @@ export default function App() {
         <div className="modal-overlay" role="dialog" aria-modal="true">
           <div className="modal">
             <div className="modal-header">
-              <h3>{videoUrl ? 'Your Final Video' : 'Creating Your Video'}</h3>
+              <h3>{videoUrl ? 'Your Final Video' : 'Generating your video...'}</h3>
               <button type="button" className="modal-close" onClick={closeModal}>×</button>
             </div>
             <div className="modal-body">
               {!videoUrl && (
                 <>
-                  <div className="progress-bar">
-                    <div className="progress-fill" style={{ width: `${progress}%` }} />
+                  <div className="hint" style={{ marginBottom: 8 }}>Now, just wait for your video! Play snake to pass time!</div>
+                  <div className="game-wrapper">
+                    <Snake />
                   </div>
-                  <div className="events" style={{ maxHeight: 240 }}>
-                    {events.map(ev => (
-                      <div key={ev.id} className={`event ${ev.kind === 'error' ? 'error' : ev.kind === 'done' ? 'done' : ''}`}>
-                        {ev.kind.toUpperCase()}: {ev.message}
-                      </div>
-                    ))}
-                  </div>
+                  <button type="button" className="secondary" onClick={() => setShowLogs(v => !v)} style={{ marginTop: 12 }}>
+                    {showLogs ? 'Hide Logs' : 'Show Logs'}
+                  </button>
+                  {showLogs && (
+                    <div className="events" style={{ maxHeight: 240, marginTop: 10 }}>
+                      {events.map(ev => (
+                        <div key={ev.id} className={`event ${ev.kind === 'error' ? 'error' : ev.kind === 'done' ? 'done' : ''}`}>
+                          {ev.kind.toUpperCase()}: {ev.message}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </>
               )}
 
@@ -232,7 +245,7 @@ export default function App() {
                 <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
               ) : (
                 <>
-                  <a href={videoUrl} download className="secondary" style={{ textDecoration: 'none', padding: '10px 14px', borderRadius: 10 }}>Download MP4</a>
+                  <a href={videoUrl} download={`demo_voiceover_${Date.now()}.mp4`} className="secondary" style={{ textDecoration: 'none', padding: '10px 14px', borderRadius: 10 }}>Download MP4</a>
                   <a href={videoUrl} target="_blank" rel="noreferrer" className="secondary" style={{ textDecoration: 'none', padding: '10px 14px', borderRadius: 10 }}>Open in new tab</a>
                   <button type="button" className="secondary" onClick={() => navigator.clipboard.writeText(videoUrl)}>Copy link</button>
                 </>

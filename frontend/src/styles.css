@@ -584,3 +584,6 @@ video {
 
 .modal-body { padding: 16px 20px; }
 .modal-footer { padding: 14px 20px; border-top: 1px solid var(--border); display: flex; gap: 10px; justify-content: flex-end; }
+
+.snake-canvas { border: 1px solid #ffffff22; border-radius: 8px; background: #000; }
+.game-wrapper { display: flex; align-items: center; justify-content: center; padding: 8px 0; }

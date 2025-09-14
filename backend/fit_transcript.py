@@ -90,15 +90,14 @@ def build_prompt(original: str, target_words: int, style_hint: str = "", rolling
     context = f"\nPrior narration (context): {rolling_context.strip()}" if rolling_context else ""
     return (
         "You are an entrepreneur narrating a DEMO-DAY product walkthrough to judges.\n"
-        "Rewrite the line for a concise, benefit-focused, timed demo voice-over.\n"
-        "Write in first-person plural ('we'), confident, energetic but not hypey.\n"
-        "Prefer intent and outcomes over UI mechanics (avoid 'click', 'button', 'tab').\n"
-        "Describe what the user gains and what just happened, not low-level cursor actions.\n"
-        "Use short, fluent sentences with natural transitions between steps.\n"
-        "Skip filler words and stage directions; do not narrate waiting or loading.\n"
-        "Keep proper nouns when helpful; avoid URLs or secrets. Generalize any sensitive details.\n"
+        "Rewrite the line into a polished, clear, and persuasive voice-over.\n"
+        "Write in first-person plural ('we'), confident, friendly, and benefit-focused.\n"
+        "Explain the intent and the impact for the user; avoid low-level UI mechanics.\n"
+        "Use 1–2 full sentences per line, with smooth transitions and complete thoughts.\n"
+        "No fragments. No filler. No stage directions. Do not narrate waiting/loading.\n"
+        "Keep proper nouns when helpful; generalize any secrets.\n"
         f"MAX WORDS: {target_words}. You MUST stay ≤ this limit.\n"
-        "If the budget is very small, compress to one clear sentence that carries the key insight.\n"
+        "If the budget is small, prefer one complete, information-dense sentence instead of fragments.\n"
         "Plain text only. No bullets, no timestamps, no stage directions."
         f"{style}{context}\n\n"
         f"Source line:\n{original.strip()}\n\n"
@@ -183,6 +182,7 @@ def fit_transcript_to_time(
     model: str = "claude-sonnet-4-20250514",   # <- your exact model
     style_hint: str = "clear, confident, natural",
     context_keep_chars: int = 480,
+    min_seconds_for_min_words: float = 1.8,
 ) -> List[Segment]:
     if llm_fn is None:
         def _llm(p: str) -> str:
@@ -197,13 +197,16 @@ def fit_transcript_to_time(
 
     for seg in sorted(segments, key=lambda s: s.start):
         dur = max(0.0, (seg.end - seg.start).total_seconds())
-        budget = math.floor((dur * wpm / 60.0) * safety)
+        # Base time-proportional budget
+        budget = max(0, math.floor((dur * wpm / 60.0) * safety))
+        # Clamp upper bound first
         if max_words_per_segment is not None:
             budget = min(budget, max_words_per_segment)
-        if dur > 0 and budget < min_words_per_segment:
+        # Only enforce a minimum number of words when the segment is long enough
+        if dur >= min_seconds_for_min_words and 0 < budget < min_words_per_segment:
             budget = min_words_per_segment
 
-        if dur <= 0:
+        if dur <= 0 or budget == 0:
             rewritten = ""
         else:
             prompt = build_prompt(seg.text, target_words=max(0, budget),

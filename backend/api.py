@@ -135,6 +135,7 @@ async def process(
 
         # 2) Trim video based on stillness and remap history
         yield _sse_event("status", {"message": "Trimming the video..."}).encode()
+        yield _sse_event("progress", {"value": 25}).encode()
         trimmed_name = f"demo_trimmed_{ts}.mp4"
         trimmed_path = VIDEOS_DIR / trimmed_name
         warp_json = LOGS_DIR / f"timewarp_{ts}.json"
@@ -149,6 +150,7 @@ async def process(
                     import shutil
                     shutil.copy2(existing_videos[0], trimmed_path)
                     yield _sse_event("status", {"message": "Used existing video as placeholder"}).encode()
+                    yield _sse_event("progress", {"value": 35}).encode()
                 else:
                     raise RuntimeError("No video files available for processing")
             else:
@@ -171,6 +173,7 @@ async def process(
 
         # 3) Build transcript segments (fitted to time)
         yield _sse_event("status", {"message": "Building transcript..."}).encode()
+        yield _sse_event("progress", {"value": 50}).encode()
         try:
             transcript_source = remapped_history_json if remapped_history_json.exists() else Path(history_path)
             raw_segments = segments_from_history_json(str(transcript_source))
@@ -216,6 +219,7 @@ async def process(
             return
 
         yield _sse_event("transcript_done", {"captions": f"/logs/{captions_name}"}).encode()
+        yield _sse_event("progress", {"value": 65}).encode()
 
         # 4) Choose voice (upload or base)
         BASE_VOICE_ID = "9llyPeVLVUPas3NvBogz"
@@ -231,6 +235,7 @@ async def process(
 
         # 5) Synthesize TTS per segment and build mixed audio
         yield _sse_event("status", {"message": "Synthesizing voiceover..."}).encode()
+        yield _sse_event("progress", {"value": 75}).encode()
         try:
             def _run_ff(cmd: list[str]) -> None:
                 p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -347,6 +352,7 @@ async def process(
             mixed_wav_name = f"mixed_{ts}.wav"
             mixed_wav_path = AUDIO_DIR / mixed_wav_name
             mixed.export(str(mixed_wav_path), format="wav")
+            yield _sse_event("progress", {"value": 90}).encode()
 
             final_name = f"demo_voiceover_{ts}.mp4"
             final_path = VIDEOS_DIR / final_name
@@ -357,6 +363,7 @@ async def process(
 
         # 6) Finalize
         yield _sse_event("status", {"message": "Finalizing your video..."}).encode()
+        yield _sse_event("progress", {"value": 100}).encode()
         yield _sse_event("complete", {
             "trimmed_video": f"/videos/{trimmed_name}",
             "history": f"/logs/{Path(history_path).name}",

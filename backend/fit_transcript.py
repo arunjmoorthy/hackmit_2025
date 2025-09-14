@@ -89,9 +89,11 @@ def build_prompt(original: str, target_words: int, style_hint: str = "", rolling
     style = f"\nStyle hint: {style_hint}" if style_hint else ""
     context = f"\nPrior narration (context): {rolling_context.strip()}" if rolling_context else ""
     return (
+        "You are an entepreneur showcasing your project for demo day to judges.\n"
         "Rewrite the line for a timed product demo voice-over.\n"
+        "Instead of outputting something like 'Now entering our login credentials.', output 'We will now input our login credentials.'"
         f"MAX WORDS: {target_words}. You MUST stay ≤ this limit.\n"
-        "Keep key info, be fluent and natural; remove filler; if too short, add brief connectors.\n"
+        "Keep key info, be fluent and natural; speak in full sentences; if too short, add brief connectors.\n"
         "Plain text only. No bullets, no timestamps, no stage directions."
         f"{style}{context}\n\n"
         f"Source line:\n{original.strip()}\n\n"
@@ -111,8 +113,8 @@ def _pick_source_text(step: Dict[str, Any]) -> str:
     # Priority: 'evaluation_previous_goal' + 'next_goal', else 'thinking', else result summaries.
     fields = []
     if mo.get("evaluation_previous_goal"): fields.append(mo["evaluation_previous_goal"])
-    if mo.get("thinking"): fields.append(mo["thinking"])
-    elif mo.get("next_goal"): fields.append(mo["next_goal"])
+    if mo.get("next_goal"): fields.append(mo["next_goal"])
+    elif mo.get("thinking"): fields.append(mo["thinking"])
     
     # add small state hint
     if st.get("title"): fields.append(f"Page: {st['title']}")

@@ -3,6 +3,8 @@ import json
 import time
 import requests
 from typing import Optional, List, Literal, Dict, Any
+import re
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
@@ -14,6 +16,77 @@ app = FastAPI()
 
 SUNO_URL = "https://studio-api.prod.suno.com/api/v2/external/hackmit/generate"
 STATUS_URL = "https://studio-api.prod.suno.com/api/v2/external/hackmit/clips"
+
+_CT_TO_EXT = {
+    "audio/mpeg": "mp3",
+    "audio/mp3": "mp3",
+    "audio/mp4": "m4a",
+    "audio/wav": "wav",
+    "audio/x-wav": "wav",
+    "video/mp4": "mp4",
+}
+
+def _filename_from_headers(resp) -> str | None:
+    cd = resp.headers.get("Content-Disposition") or resp.headers.get("content-disposition")
+    if not cd:
+        return None
+    m = re.search(r'filename\*?=(?:UTF-8\'\')?"?([^";]+)"?', cd)
+    return m.group(1) if m else None
+
+def _ensure_ext(name: str, content_type: str | None) -> str:
+    root, ext = os.path.splitext(name)
+    if ext and len(ext) > 1:
+        return name
+    if content_type:
+        ext2 = _CT_TO_EXT.get(content_type.split(";")[0].strip().lower())
+        if ext2:
+            return f"{root}.{ext2}"
+    # fallback: try to guess from path or default to .bin
+    return f"{root}.bin"
+
+def download_media(url: str, dest_dir: str = "downloads", prefer_name: str | None = None, timeout: int = 120) -> str:
+    """
+    Downloads the media at `url` to `dest_dir` with a reasonable filename.
+    Returns the full path to the saved file.
+    """
+    os.makedirs(dest_dir, exist_ok=True)
+
+    # 1st attempt: usually a signed CDN URL requires no auth
+    headers = {}
+    r = requests.get(url, stream=True, timeout=timeout, headers=headers, allow_redirects=True)
+    # If the URL requires auth, try again with the Suno token (just in case)
+    if r.status_code in (401, 403):
+        api_key = os.getenv("SUNO_API_KEY")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+            r = requests.get(url, stream=True, timeout=timeout, headers=headers, allow_redirects=True)
+
+    r.raise_for_status()
+
+    # Decide filename
+    name = prefer_name or _filename_from_headers(r)
+    if not name:
+        # derive from URL path
+        path_part = urlsplit(r.url).path
+        base = os.path.basename(path_part) or "suno_clip"
+        name = base
+
+    name = _ensure_ext(name, r.headers.get("Content-Type"))
+    # Avoid overwriting
+    out_path = os.path.join(dest_dir, name)
+    base, ext = os.path.splitext(out_path)
+    i = 1
+    while os.path.exists(out_path):
+        out_path = f"{base}_{i}{ext}"
+        i += 1
+
+    # Stream to disk
+    with open(out_path, "wb") as f:
+        for chunk in r.iter_content(chunk_size=1 << 14):
+            if chunk:
+                f.write(chunk)
+
+    return out_path
 
 # ---------------- Models ----------------
 
@@ -180,6 +253,17 @@ if __name__ == "__main__":
         if out.get("ready"):
             c0 = out["ready"][0]
             print("Audio URL:", c0.get("audio_url") or c0.get("video_url"))
+        else:
+            print("No ready clip yet.", "(Timed out)" if out.get("timeout") else "")
+
+        if out.get("ready"):
+            c0 = out["ready"][0]
+            media_url = c0.get("audio_url") or c0.get("video_url")
+            if not media_url:
+                print("Ready clip has no media URL yet.")
+            else:
+                saved = download_media(media_url, dest_dir="artifacts/suno", prefer_name=f"suno_{clip_id}")
+                print("Saved to:", saved)
         else:
             print("No ready clip yet.", "(Timed out)" if out.get("timeout") else "")
 

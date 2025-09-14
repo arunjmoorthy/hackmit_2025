@@ -231,6 +231,41 @@ def poll_clips(
         "timeout": True,
     }
 
+
+# ---------------- Convenience: background music generation ----------------
+
+def generate_background_music(prompt: str, target_duration_seconds: int = 60) -> str:
+    """
+    Generate background music via Suno and return the path to the downloaded media file.
+    Duration is discretized to one of {30, 60, 90, 120} seconds as required by the API.
+    Requires SUNO_API_KEY in environment.
+    """
+    # Pick the smallest allowed duration >= target; fallback to max 120
+    allowed = [30, 60, 90, 120]
+    dur = next((d for d in allowed if d >= max(1, int(round(target_duration_seconds)))), 120)
+
+    req = GenerateRequest(
+        prompt=prompt,
+        tags="instrumental, ambient, minimal",
+        makeInstrumental=True,
+        duration=dur,
+    )
+    resp_model = generate_song(req)
+    if not resp_model or not resp_model.clips:
+        raise RuntimeError("Suno did not return a clip id")
+    clip_id = resp_model.clips[0].id
+
+    out = poll_clips([clip_id], timeout=300, interval=6, return_when="any_ready")
+    if not out.get("ready"):
+        raise RuntimeError("Suno background music generation did not complete in time")
+    c0 = out["ready"][0]
+    media_url = c0.get("audio_url") or c0.get("video_url")
+    if not media_url:
+        raise RuntimeError("Ready clip has no media URL")
+
+    saved = download_media(media_url, dest_dir="artifacts/audio", prefer_name=f"suno_bg_{clip_id}")
+    return saved
+
 # ---------------- Example usage ----------------
 
 if __name__ == "__main__":

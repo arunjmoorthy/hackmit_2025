@@ -228,7 +228,24 @@ async def create_demo_video_with_timestamps(url: str, description: str, output_d
             enable_memory=False,
         )
 
+    # Start a best-effort full-screen recorder alongside the agent run
+    # This avoids relying solely on the browser-use internal recording
+    recorder_path = videos_dir / f"demo_full_{timestamp_str}.mp4"
+    try:
+        rec = ScreenRecorder(out_path=str(recorder_path), fps=30, display="auto", audio=None, platform="auto")
+        rec.start()
+    except Exception:
+        rec = None  # Recording is optional
+
+    # Run the agent
     history = await agent.run(max_steps=40)
+
+    # Stop recorder if it was started
+    try:
+        if rec is not None:
+            rec.stop()
+    except Exception:
+        pass
 
     # Persist full history as emitted by the library (for auditing/analysis)
     history_path = logs_dir / f"agent_history_{timestamp_str}.json"

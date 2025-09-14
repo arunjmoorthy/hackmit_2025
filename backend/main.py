@@ -206,10 +206,6 @@ async def create_demo_video_with_timestamps(url: str, description: str, output_d
         f" then proceed. Do not ask for further confirmation. When complete, respond 'done' and stop."
     )
 
-    # task = (
-    #     f"Open {url}. "
-    # )
-
     try:
         agent = Agent(
             task=task,
@@ -217,7 +213,7 @@ async def create_demo_video_with_timestamps(url: str, description: str, output_d
             max_actions_per_step=3,
             max_failures=3,
             enable_memory=False,
-            browser_context_kwargs=browser_context_kwargs,  # type: ignore[arg-type]
+            browser_context_kwargs=browser_context_kwargs,
         )
     except TypeError:
         agent = Agent(

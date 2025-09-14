@@ -121,11 +121,10 @@ async def main() -> None:
         trim_video(
             input_path=str(full_video),
             output_path=str(trimmed_video),
-            mode='cap',
-            still_min_seconds=1.0,
-            cap_seconds=2.0,
-            frame_step=4,
-            diff_threshold=2,
+            mode='cut',                 # drop still stretches entirely
+            still_min_seconds=2.5,      # treat >=2.5s still as removable
+            frame_step=3,               # slightly denser sampling for accuracy
+            diff_threshold=1.2,         # stricter stillness detection
             warp_out_path=str(warp_json),
             history_json_path=str(history_file),
             remapped_history_path=str(remapped_history_json),
@@ -134,25 +133,9 @@ async def main() -> None:
         print("Trimming failed:", e)
         return
 
-    # 6) Generate transcript segments aligned to TRIMMED time ranges (use remapped history)
-    # Prefer remapped history; fall back to raw history if not present
-    history_for_transcript = remapped_history_json if remapped_history_json.exists() else history_file
+    # 6) Skip transcript generation for now; focus on remapped history correctness
     if not remapped_history_json.exists():
-        print("Warning: remapped history not found; generating transcript from raw history.")
-    try:
-        segments = generate_transcript_from_history(str(history_for_transcript))
-    except Exception as e:
-        print("Transcript generation failed:", e)
-        return
-
-    # Name transcript file alongside logs, keyed by history timestamp if present
-    hist_stem = history_file.stem  # e.g., agent_history_20250913-195800
-    ts = hist_stem.replace("agent_history_", "")
-    transcript_path = logs_dir / f"transcript_trimmed_{ts}.json"
-    with open(transcript_path, "w", encoding="utf-8") as f:
-        json.dump({"segments": segments}, f, ensure_ascii=False, indent=2)
-
-    print("\nTranscript:", transcript_path)
+        print("Warning: remapped history not generated. Check trimming alignment logs.")
 
 
 if __name__ == "__main__":

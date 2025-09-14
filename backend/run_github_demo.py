@@ -34,7 +34,42 @@ async def main() -> None:
             n += 1
 
     full_video = _next_available_path(videos_dir / "demo_full.mp4")
-    recorder = ScreenRecorder(out_path=str(full_video), fps=30, display="auto", audio=None)
+    # Force mac screen capture with auto screen selection; disable audio to avoid device conflicts
+    # Force screen capture device selection in code (macOS):
+    # Probe devices and pick the best match for the screen; otherwise fallback to index 1
+    tmp_recorder = ScreenRecorder(out_path=str(full_video), fps=30, display="auto", audio=None, platform="auto")
+    try:
+        vids, _ = tmp_recorder._list_avfoundation_devices()
+        # print(f"[DEBUG] Available AVFoundation video devices: {vids}")
+        # Prefer exact 'Capture screen 0', then names starting with 'Capture screen', then any containing 'screen'
+        screen_idx = None
+        for i, n in vids:
+            if n.strip().startswith("Capture screen 0"):
+                screen_idx = i
+                print(f"Selected screen capture device: '{n}' at index {i}")
+                break
+        if screen_idx is None:
+            for i, n in vids:
+                if n.strip().lower().startswith("capture screen"):
+                    screen_idx = i
+                    print(f"Selected screen capture device: '{n}' at index {i}")
+                    break
+        if screen_idx is None:
+            for i, n in vids:
+                if "screen" in n.lower():
+                    screen_idx = i
+                    print(f"Selected screen-like device: '{n}' at index {i}")
+                    break
+        if screen_idx is None:
+            screen_idx = 1
+            print(f"No screen device found, falling back to index {screen_idx}")
+        display_sel = screen_idx
+    except Exception as e:
+        print(f"Exception during device probing: {e}, using 'auto'")
+        display_sel = "auto"
+
+    print(f"Starting screen recording with device index: {display_sel}")
+    recorder = ScreenRecorder(out_path=str(full_video), fps=30, display=display_sel, audio=None, platform="auto")
     recorder.start()
 
     try:
@@ -86,42 +121,21 @@ async def main() -> None:
         trim_video(
             input_path=str(full_video),
             output_path=str(trimmed_video),
-<<<<<<< Updated upstream
-            mode='cut',
-            still_min_seconds=3.0,
-            frame_step=10,
+            mode='cut',                 # drop still stretches entirely
+            still_min_seconds=2.5,      # treat >=2.5s still as removable
+            frame_step=3,               # slightly denser sampling for accuracy
+            diff_threshold=1.2,         # stricter stillness detection
             warp_out_path=str(warp_json),
             history_json_path=str(history_file),
             remapped_history_path=str(remapped_history_json),
-=======
-            mode='cap',
-            still_min_seconds=1.0,
-            cap_seconds=2.0,
-            frame_step=4,
-            diff_threshold=2,
-            # warp_out_path=str(warp_json),
-            # remapped_history_path=str(remapped_history_json),
->>>>>>> Stashed changes
         )
     except Exception as e:
         print("Trimming failed:", e)
         return
 
-    # 6) Generate transcript segments aligned to TRIMMED time ranges (use remapped history)
-    try:
-        segments = generate_transcript_from_history(str(remapped_history_json))
-    except Exception as e:
-        print("Transcript generation failed:", e)
-        return
-
-    # Name transcript file alongside logs, keyed by history timestamp if present
-    hist_stem = history_file.stem  # e.g., agent_history_20250913-195800
-    ts = hist_stem.replace("agent_history_", "")
-    transcript_path = logs_dir / f"transcript_trimmed_{ts}.json"
-    with open(transcript_path, "w", encoding="utf-8") as f:
-        json.dump({"segments": segments}, f, ensure_ascii=False, indent=2)
-
-    print("\nTranscript:", transcript_path)
+    # 6) Skip transcript generation for now; focus on remapped history correctness
+    if not remapped_history_json.exists():
+        print("Warning: remapped history not generated. Check trimming alignment logs.")
 
 
 if __name__ == "__main__":

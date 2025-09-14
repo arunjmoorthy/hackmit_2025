@@ -8,6 +8,11 @@ from tqdm import tqdm
 import json
 from typing import List, Tuple, Dict, Any, Optional
 
+# Tuning constants
+PRESERVE_STEP_WINDOWS = False  # Set True to force-keep full step windows (reduces trimming)
+KEEP_LEAD_PAD = 0.15          # seconds of context before each kept segment
+KEEP_TAIL_PAD = 0.15          # seconds of context after each kept segment
+
 def get_video_duration(path: str) -> float:
     """Return duration in seconds using ffprobe."""
     cmd = [
@@ -115,32 +120,148 @@ def build_timewarp(keep_intervals: List[Tuple[float, float]]) -> Dict[str, Any]:
 def warp_time(t: float, warp: Dict[str, Any]) -> float:
     """
     Map original time t (seconds since video start) to trimmed time using warp mapping.
-    If t is inside a removed gap, returns the next dst_start (i.e., snaps forward).
+    If t is inside a removed gap, snaps to the start of the next kept segment.
     """
-    for p in warp.get("pieces", []):
+    pieces = warp.get("pieces", [])
+    if not pieces:
+        return t
+    
+    # If before first kept segment, map to 0
+    if t < pieces[0]["src_start"]:
+        return 0.0
+    
+    # Check if t falls within any kept segment
+    for p in pieces:
+        src_start, src_end, dst_start = p["src_start"], p["src_end"], p["dst_start"]
+        if src_start <= t < src_end:
+            # t is within this kept segment
+            return dst_start + (t - src_start)
+    
+    # t is after all kept segments, map to end of trimmed video
+    last = pieces[-1]
+    return last["dst_start"] + (last["src_end"] - last["src_start"])
+
+def _warp_interval_with_overlap(start_s: float, end_s: float, warp: Dict[str, Any]) -> Tuple[float, float, float]:
+    """
+    Map [start_s, end_s] on original timeline into the trimmed timeline using piecewise mapping.
+    Returns (trimmed_start, trimmed_end, overlap_len_seconds).
+    If the interval has no overlap with any kept segment, returns the next dst boundary with 0 overlap.
+    """
+    pieces = warp.get("pieces", [])
+    if not pieces:
+        return start_s, end_s, max(0.0, end_s - start_s)
+
+    # Entirely before first kept segment
+    if end_s <= pieces[0]["src_start"]:
+        return 0.0, 0.0, 0.0
+
+    trimmed_start: Optional[float] = None
+    trimmed_end: Optional[float] = None
+    total_overlap = 0.0
+
+    for p in pieces:
         a, b, C = p["src_start"], p["src_end"], p["dst_start"]
-        if a <= t < b:
-            return C + (t - a)
-    if warp.get("pieces"):
-        if t < warp["pieces"][0]["src_start"]:
-            return 0.0
-        last = warp["pieces"][-1]
-        return last["dst_start"] + (last["src_end"] - last["src_start"])
-    return t
+        ov_s = max(start_s, a)
+        ov_e = min(end_s, b)
+        if ov_e > ov_s:
+            dst_s = C + (ov_s - a)
+            dst_e = C + (ov_e - a)
+            if trimmed_start is None:
+                trimmed_start = dst_s
+            trimmed_end = dst_e
+            total_overlap += (ov_e - ov_s)
+
+    if trimmed_start is None:
+        # No overlap; snap to next kept piece or end
+        for p in pieces:
+            if start_s < p["src_end"]:
+                return p["dst_start"], p["dst_start"], 0.0
+        last = pieces[-1]
+        end_dst = last["dst_start"] + (last["src_end"] - last["src_start"])
+        return end_dst, end_dst, 0.0
+
+    return round(float(trimmed_start), 3), round(float(trimmed_end or trimmed_start), 3), round(float(total_overlap), 3)
 
 def remap_history_durations_to_trimmed(history: Dict[str, Any], warp: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Remap per-step start/end times to the TRIMMED clock using cumulative durations
-    when absolute epochs are not available. Adds 'trimmed_step_start'/'trimmed_step_end'
-    to each item's metadata without removing existing fields.
+    Remap per-step start/end times onto the TRIMMED clock.
+    Preference order for source times:
+      1) metadata.step_start_time / metadata.step_end_time (epoch seconds)
+         → convert to video-relative seconds using first available step_start_time
+      2) metadata.duration_seconds cumulative timeline
+    Writes metadata.trimmed_step_start and metadata.trimmed_step_end for each step.
     """
     out = json.loads(json.dumps(history))
     items = out.get("history") or []
     if not isinstance(items, list):
         return out
 
-    # Compute cumulative windows from metadata.duration_seconds
+    # Check for epoch-based timing
+    epochs: List[Optional[float]] = []
+    for it in items:
+        meta = it.get("metadata") or {}
+        try:
+            epochs.append(float(meta.get("step_start_time")))
+        except Exception:
+            epochs.append(None)
+
+    have_epochs = any(e is not None for e in epochs)
+
+    if have_epochs:
+        # Compute relative 0 from first available start epoch
+        first_epoch: Optional[float] = None
+        for it in items:
+            meta = it.get("metadata") or {}
+            try:
+                val = float(meta.get("step_start_time"))
+            except Exception:
+                val = None
+            if val is not None:
+                first_epoch = val
+                break
+        if first_epoch is None:
+            first_epoch = 0.0
+
+        new_items: List[Dict[str, Any]] = []
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            meta = item.get("metadata") or {}
+            try:
+                s_epoch = float(meta.get("step_start_time"))
+            except Exception:
+                s_epoch = None
+            try:
+                e_epoch = float(meta.get("step_end_time"))
+            except Exception:
+                e_epoch = None
+
+            if s_epoch is not None and e_epoch is not None and e_epoch < s_epoch:
+                s_epoch, e_epoch = e_epoch, s_epoch
+
+            if s_epoch is not None and e_epoch is not None:
+                start_s = max(0.0, s_epoch - first_epoch)
+                end_s = max(start_s, e_epoch - first_epoch)
+            else:
+                # Fallback to zero-length
+                start_s = 0.0
+                end_s = 0.0
+
+            t_start_trim, t_end_trim, ov_len = _warp_interval_with_overlap(start_s, end_s, warp)
+            item.setdefault("metadata", {})
+            item["metadata"]["trimmed_step_start"] = t_start_trim
+            item["metadata"]["trimmed_step_end"] = t_end_trim
+            item["metadata"]["trimmed_overlap_length"] = ov_len
+            print(f"[REMAP DEBUG] Step {item.get('metadata', {}).get('step_number', '?')}: "
+                  f"epoch {start_s:.3f}-{end_s:.3f} -> trimmed {t_start_trim:.3f}-{t_end_trim:.3f} (ov {ov_len:.3f})")
+            if ov_len > 0.05:
+                new_items.append(item)
+        out["history"] = new_items
+        return out
+
+    # Fallback to cumulative durations when epochs missing
     cursor = 0.0
+    new_items: List[Dict[str, Any]] = []
     for item in items:
         if not isinstance(item, dict):
             continue
@@ -151,12 +272,17 @@ def remap_history_durations_to_trimmed(history: Dict[str, Any], warp: Dict[str, 
             dur = 0.0
         start_s = cursor
         end_s = cursor + max(0.0, dur)
-        t_start_trim = round(warp_time(start_s, warp), 3)
-        t_end_trim = round(warp_time(end_s, warp), 3)
+        t_start_trim, t_end_trim, ov_len = _warp_interval_with_overlap(start_s, end_s, warp)
         item.setdefault("metadata", {})
         item["metadata"]["trimmed_step_start"] = t_start_trim
         item["metadata"]["trimmed_step_end"] = t_end_trim
+        item["metadata"]["trimmed_overlap_length"] = ov_len
+        print(f"[REMAP DEBUG] Step {item.get('metadata', {}).get('step_number', '?')}: "
+              f"duration {start_s:.3f}-{end_s:.3f} -> trimmed {t_start_trim:.3f}-{t_end_trim:.3f} (ov {ov_len:.3f})")
         cursor = end_s
+        if ov_len > 0.05:
+            new_items.append(item)
+    out["history"] = new_items
     return out
 
 def invert_and_cap_intervals(
@@ -198,6 +324,109 @@ def invert_and_cap_intervals(
     # Remove zero/negative spans
     merged = [(s, e) for s, e in merged if e - s > 1e-3]
     return merged
+
+def merge_intervals(intervals: List[Tuple[float, float]], pad: float = 0.0) -> List[Tuple[float, float]]:
+    """
+    Merge overlapping/touching intervals; optionally expand each by 'pad' seconds on both ends.
+    """
+    if not intervals:
+        return []
+    expanded = [(max(0.0, s - pad), max(s - pad, e + pad)) for (s, e) in intervals]
+    expanded.sort()
+    merged: List[Tuple[float, float]] = []
+    cs, ce = expanded[0]
+    for s, e in expanded[1:]:
+        if s <= ce + 1e-3:
+            ce = max(ce, e)
+        else:
+            merged.append((cs, ce))
+            cs, ce = s, e
+    merged.append((cs, ce))
+    return merged
+
+def pad_keep_segments(keep: List[Tuple[float, float]], lead: float, tail: float, duration: float) -> List[Tuple[float, float]]:
+    if not keep:
+        return []
+    padded = []
+    for s, e in keep:
+        ns = max(0.0, s - lead)
+        ne = min(duration, e + tail)
+        if ne > ns:
+            padded.append((ns, ne))
+    # merge touching
+    padded.sort()
+    merged: List[Tuple[float, float]] = []
+    cs, ce = padded[0]
+    for s, e in padded[1:]:
+        if s <= ce + 1e-3:
+            ce = max(ce, e)
+        else:
+            merged.append((cs, ce))
+            cs, ce = s, e
+    merged.append((cs, ce))
+    return merged
+
+def windows_from_history(history_obj: Dict[str, Any]) -> Tuple[List[Tuple[float, float]], float]:
+    """
+    Extract step windows in seconds relative to first step start if epoch times exist,
+    otherwise use cumulative metadata.duration_seconds. Returns (windows, origin_epoch).
+    """
+    items = history_obj.get("history") or []
+    items = [i for i in items if isinstance(i, dict)]
+    # Check for epochs
+    epochs: List[Optional[float]] = []
+    for it in items:
+        meta = it.get("metadata") or {}
+        try:
+            epochs.append(float(meta.get("step_start_time")))
+        except Exception:
+            epochs.append(None)
+    have_epochs = any(e is not None for e in epochs)
+
+    if have_epochs:
+        first_epoch: Optional[float] = None
+        for it in items:
+            meta = it.get("metadata") or {}
+            try:
+                v = float(meta.get("step_start_time"))
+            except Exception:
+                v = None
+            if v is not None:
+                first_epoch = v
+                break
+        if first_epoch is None:
+            first_epoch = 0.0
+        wins: List[Tuple[float, float]] = []
+        for it in items:
+            meta = it.get("metadata") or {}
+            try:
+                s = float(meta.get("step_start_time"))
+            except Exception:
+                s = None
+            try:
+                e = float(meta.get("step_end_time"))
+            except Exception:
+                e = None
+            if s is not None and e is not None:
+                if e < s:
+                    s, e = e, s
+                wins.append((max(0.0, s - first_epoch), max(0.0, e - first_epoch)))
+        return wins, first_epoch
+
+    # Fallback to cumulative durations
+    wins: List[Tuple[float, float]] = []
+    cursor = 0.0
+    for it in items:
+        meta = it.get("metadata") or {}
+        try:
+            dur = float(meta.get("duration_seconds") or 0.0)
+        except Exception:
+            dur = 0.0
+        s = cursor
+        e = cursor + max(0.0, dur)
+        wins.append((s, e))
+        cursor = e
+    return wins, 0.0
 
 def cut_with_ffmpeg(input_path: str, output_path: str, keep_segments: list, reencode=True):
     """
@@ -286,13 +515,37 @@ def jumpcut_video(
     else:
         raise ValueError("mode must be 'cut' or 'cap'")
 
+    # Add small context around kept segments, then merge
+    keep = pad_keep_segments(keep, KEEP_LEAD_PAD, KEEP_TAIL_PAD, duration)
+
     kept_total = sum(e - s for s, e in keep)
     print(f"Keeping {len(keep)} segments, total {kept_total:.2f}s")
     for s, e in keep:
         print(f"  keep: {s:.2f}s → {e:.2f}s ({e - s:.2f}s)")
 
+    # If history provided, ensure we ALWAYS keep around each step window so timestamps map correctly
+    if history_json_path and PRESERVE_STEP_WINDOWS:
+        try:
+            with open(history_json_path, "r", encoding="utf-8") as f:
+                history_obj = json.load(f)
+            step_wins, _ = windows_from_history(history_obj)
+            # Add a small pad around steps to ensure context remains
+            combined = merge_intervals(keep + step_wins, pad=0.20)
+            keep = combined
+            kept_total = sum(e - s for s, e in keep)
+            print(f"[ALIGN DEBUG] After union with step windows → keeping {len(keep)} segments, total {kept_total:.2f}s")
+            for s, e in keep:
+                print(f"  keep: {s:.2f}s → {e:.2f}s ({e - s:.2f}s)")
+        except Exception as e:
+            print("[ALIGN DEBUG] Failed to union step windows:", e)
+
     # Build and optionally emit time-warp mapping and remapped history
     warp = build_timewarp(keep)
+    print(f"[WARP DEBUG] Time warp mapping:")
+    for i, piece in enumerate(warp.get("pieces", [])):
+        print(f"  Piece {i}: src {piece['src_start']:.3f}-{piece['src_end']:.3f} -> dst {piece['dst_start']:.3f}-{piece['dst_start'] + (piece['src_end'] - piece['src_start']):.3f}")
+    print(f"  Total trimmed duration: {warp.get('total_dst', 0):.3f}s")
+    
     if warp_out_path:
         try:
             with open(warp_out_path, "w", encoding="utf-8") as f:

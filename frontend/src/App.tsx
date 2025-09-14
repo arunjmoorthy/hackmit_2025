@@ -158,8 +158,10 @@ export default function App() {
   return (
     <div className="container">
       <header>
-        <h1>Demo Video Creator</h1>
-        <p>Provide a URL, a short description, and a quick audio clip.</p>
+        <div className="brand">
+          <img src="/assets/logo.png" alt="Spotlight" className="logo" />
+        </div>
+        <p>Turn a URL and a short description into a polished narrated demo.</p>
       </header>
 
       <form onSubmit={onSubmit}>

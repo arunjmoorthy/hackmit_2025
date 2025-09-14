@@ -5,6 +5,8 @@ import math
 import cv2
 import numpy as np
 from tqdm import tqdm
+import json
+from typing import List, Tuple, Dict, Any, Optional
 
 def get_video_duration(path: str) -> float:
     """Return duration in seconds using ffprobe."""
@@ -95,6 +97,67 @@ def detect_stills(
         else:
             merged.append((s, e))
     return merged
+
+def build_timewarp(keep_intervals: List[Tuple[float, float]]) -> Dict[str, Any]:
+    """
+    Build piecewise linear mapping from original video time -> trimmed video time.
+    For each kept interval [a,b), it maps to [C, C + (b-a)), where C is cumulative.
+    Returns a dict with 'pieces' and 'total_dst'.
+    """
+    pieces: List[Dict[str, float]] = []
+    cumulative = 0.0
+    for (a, b) in keep_intervals:
+        length = max(0.0, b - a)
+        pieces.append({"src_start": float(a), "src_end": float(b), "dst_start": float(cumulative)})
+        cumulative += length
+    return {"pieces": pieces, "total_dst": float(cumulative)}
+
+def warp_time(t: float, warp: Dict[str, Any]) -> float:
+    """
+    Map original time t (seconds since video start) to trimmed time using warp mapping.
+    If t is inside a removed gap, returns the next dst_start (i.e., snaps forward).
+    """
+    for p in warp.get("pieces", []):
+        a, b, C = p["src_start"], p["src_end"], p["dst_start"]
+        if a <= t < b:
+            return C + (t - a)
+    if warp.get("pieces"):
+        if t < warp["pieces"][0]["src_start"]:
+            return 0.0
+        last = warp["pieces"][-1]
+        return last["dst_start"] + (last["src_end"] - last["src_start"])
+    return t
+
+def remap_history_durations_to_trimmed(history: Dict[str, Any], warp: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Remap per-step start/end times to the TRIMMED clock using cumulative durations
+    when absolute epochs are not available. Adds 'trimmed_step_start'/'trimmed_step_end'
+    to each item's metadata without removing existing fields.
+    """
+    out = json.loads(json.dumps(history))
+    items = out.get("history") or []
+    if not isinstance(items, list):
+        return out
+
+    # Compute cumulative windows from metadata.duration_seconds
+    cursor = 0.0
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        meta = item.get("metadata") or {}
+        try:
+            dur = float(meta.get("duration_seconds") or 0.0)
+        except Exception:
+            dur = 0.0
+        start_s = cursor
+        end_s = cursor + max(0.0, dur)
+        t_start_trim = round(warp_time(start_s, warp), 3)
+        t_end_trim = round(warp_time(end_s, warp), 3)
+        item.setdefault("metadata", {})
+        item["metadata"]["trimmed_step_start"] = t_start_trim
+        item["metadata"]["trimmed_step_end"] = t_end_trim
+        cursor = end_s
+    return out
 
 def invert_and_cap_intervals(
     full_duration: float,
@@ -190,6 +253,9 @@ def jumpcut_video(
     still_min_seconds: float = 3.0,
     frame_step: int = 2,
     diff_threshold: float = 1.0,
+    warp_out_path: Optional[str] = None,
+    history_json_path: Optional[str] = None,
+    remapped_history_path: Optional[str] = None,
 ):
     """
     Main wrapper.
@@ -224,6 +290,25 @@ def jumpcut_video(
     print(f"Keeping {len(keep)} segments, total {kept_total:.2f}s")
     for s, e in keep:
         print(f"  keep: {s:.2f}s → {e:.2f}s ({e - s:.2f}s)")
+
+    # Build and optionally emit time-warp mapping and remapped history
+    warp = build_timewarp(keep)
+    if warp_out_path:
+        try:
+            with open(warp_out_path, "w", encoding="utf-8") as f:
+                json.dump(warp, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print("Failed to write warp mapping:", e)
+
+    if history_json_path and remapped_history_path:
+        try:
+            with open(history_json_path, "r", encoding="utf-8") as f:
+                history_obj = json.load(f)
+            remapped = remap_history_durations_to_trimmed(history_obj, warp)
+            with open(remapped_history_path, "w", encoding="utf-8") as f:
+                json.dump(remapped, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print("Failed to remap history:", e)
 
     cut_with_ffmpeg(input_path, output_path, keep)
     print(f"Done → {output_path}")

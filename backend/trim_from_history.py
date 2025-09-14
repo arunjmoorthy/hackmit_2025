@@ -130,16 +130,76 @@ def warp_time(t: float, warp: Dict[str, Any]) -> float:
 
 def remap_history_durations_to_trimmed(history: Dict[str, Any], warp: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Remap per-step start/end times to the TRIMMED clock using cumulative durations
-    when absolute epochs are not available. Adds 'trimmed_step_start'/'trimmed_step_end'
-    to each item's metadata without removing existing fields.
+    Remap per-step start/end times onto the TRIMMED clock.
+    Preference order for source times:
+      1) metadata.step_start_time / metadata.step_end_time (epoch seconds)
+         → convert to video-relative seconds using first available step_start_time
+      2) metadata.duration_seconds cumulative timeline
+    Writes metadata.trimmed_step_start and metadata.trimmed_step_end for each step.
     """
     out = json.loads(json.dumps(history))
     items = out.get("history") or []
     if not isinstance(items, list):
         return out
 
-    # Compute cumulative windows from metadata.duration_seconds
+    # Check for epoch-based timing
+    epochs: List[Optional[float]] = []
+    for it in items:
+        meta = it.get("metadata") or {}
+        try:
+            epochs.append(float(meta.get("step_start_time")))
+        except Exception:
+            epochs.append(None)
+
+    have_epochs = any(e is not None for e in epochs)
+
+    if have_epochs:
+        # Compute relative 0 from first available start epoch
+        first_epoch: Optional[float] = None
+        for it in items:
+            meta = it.get("metadata") or {}
+            try:
+                val = float(meta.get("step_start_time"))
+            except Exception:
+                val = None
+            if val is not None:
+                first_epoch = val
+                break
+        if first_epoch is None:
+            first_epoch = 0.0
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            meta = item.get("metadata") or {}
+            try:
+                s_epoch = float(meta.get("step_start_time"))
+            except Exception:
+                s_epoch = None
+            try:
+                e_epoch = float(meta.get("step_end_time"))
+            except Exception:
+                e_epoch = None
+
+            if s_epoch is not None and e_epoch is not None and e_epoch < s_epoch:
+                s_epoch, e_epoch = e_epoch, s_epoch
+
+            if s_epoch is not None and e_epoch is not None:
+                start_s = max(0.0, s_epoch - first_epoch)
+                end_s = max(start_s, e_epoch - first_epoch)
+            else:
+                # Fallback to zero-length
+                start_s = 0.0
+                end_s = 0.0
+
+            t_start_trim = round(warp_time(start_s, warp), 3)
+            t_end_trim = round(warp_time(end_s, warp), 3)
+            item.setdefault("metadata", {})
+            item["metadata"]["trimmed_step_start"] = t_start_trim
+            item["metadata"]["trimmed_step_end"] = t_end_trim
+        return out
+
+    # Fallback to cumulative durations when epochs missing
     cursor = 0.0
     for item in items:
         if not isinstance(item, dict):

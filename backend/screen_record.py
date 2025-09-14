@@ -43,38 +43,68 @@ class ScreenRecorder:
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
         )
         txt = (proc.stdout or "") + (proc.stderr or "")
+        
+        # Check for permission issues
+        if "Operation not permitted" in txt or "not authorized" in txt.lower():
+            print("[ScreenRecorder] ERROR: Screen Recording permission denied!")
+            print("Go to System Preferences > Security & Privacy > Privacy > Screen Recording")
+            print("and enable screen recording for Terminal/Python/your IDE.")
+            
+        # print(f"[ScreenRecorder DEBUG] Raw ffmpeg output:\n{txt}")  # Uncomment for debugging
+        
         vids, auds, mode = [], [], None
         for line in txt.splitlines():
             if "AVFoundation video devices" in line:
                 mode = "video"; continue
             if "AVFoundation audio devices" in line:
                 mode = "audio"; continue
-            if mode and "[" in line and "]" in line:
+            # Look for device lines like "[AVFoundation indev @ 0x...] [0] FaceTime HD Camera"
+            if mode and "[AVFoundation indev @" in line and "] [" in line and "]" in line:
                 try:
-                    idx = int(line.split("[",1)[1].split("]",1)[0].strip())
-                    name = line.split("]",1)[1].strip()
-                    if mode == "video": vids.append((idx, name))
-                    else: auds.append((idx, name))
-                except Exception:
+                    # Extract the device index and name from lines like:
+                    # "[AVFoundation indev @ 0x7f8db8004a40] [3] Capture screen 0"
+                    parts = line.split("] [", 1)
+                    if len(parts) == 2:
+                        idx_part = parts[1].split("]", 1)
+                        if len(idx_part) == 2:
+                            idx = int(idx_part[0].strip())
+                            name = idx_part[1].strip()
+                            if mode == "video": 
+                                vids.append((idx, name))
+                                # print(f"[ScreenRecorder DEBUG] Found video device: [{idx}] {name}")
+                            else: 
+                                auds.append((idx, name))
+                                # print(f"[ScreenRecorder DEBUG] Found audio device: [{idx}] {name}")
+                except Exception as e:
+                    print(f"[ScreenRecorder DEBUG] Failed to parse device line: {line}, error: {e}")
                     pass
         return vids, auds
 
     def _pick_mac_screen_index(self):
         """
-        If display is 'auto', pick the first AVFoundation video device
-        whose name contains 'Capture screen'. Otherwise, trust the int.
+        If display is 'auto', pick the AVFoundation video device that looks like a screen
+        (case-insensitive 'screen' substring, prioritizing names starting with 'Capture screen').
+        Otherwise, trust the provided int.
         """
         if isinstance(self.display, int):
             return self.display
         vids, _ = self._list_avfoundation_devices()
-        # Prefer 'Capture screen 0' then any 'Capture screen'
-        screen0 = [i for (i, n) in vids if "Capture screen 0" in n]
+        # Prefer 'Capture screen 0' (exact), then any starting with 'Capture screen', then any containing 'screen'
+        screen0 = [i for (i, n) in vids if n.strip().startswith("Capture screen 0")]
         if screen0:
             return screen0[0]
-        screens = [i for (i, n) in vids if "Capture screen" in n]
+        screens_prefix = [i for (i, n) in vids if n.strip().lower().startswith("capture screen")]
+        if screens_prefix:
+            return screens_prefix[0]
+        screens = [i for (i, n) in vids if "screen" in n.lower()]
         if screens:
             return screens[0]
-        # Fallback: 1 is often the screen on many Macs
+        # Fallback: 1 is often the screen on many Macs; print devices for debugging
+        try:
+            devices_str = ", ".join([f"[{i}] {n}" for (i, n) in vids]) or "<no video devices>"
+            print(f"[ScreenRecorder] Warning: no 'screen' device detected. Devices: {devices_str}. Falling back to index 1.")
+        except Exception:
+            pass
         return 1
 
     # ---------------------
@@ -155,6 +185,7 @@ class ScreenRecorder:
             raise RuntimeError("Recorder already running.")
         Path(self.out_path).parent.mkdir(parents=True, exist_ok=True)
         cmd = self._ffmpeg_cmd()
+        # print(f"[ScreenRecorder DEBUG] ffmpeg command: {' '.join(cmd)}")  # Uncomment for debugging
         # Capture stderr for debugging, discard stdout
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
         time.sleep(0.4)  # tiny warmup to avoid first-frame hiccup

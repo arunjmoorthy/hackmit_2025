@@ -34,7 +34,42 @@ async def main() -> None:
             n += 1
 
     full_video = _next_available_path(videos_dir / "demo_full.mp4")
-    recorder = ScreenRecorder(out_path=str(full_video), fps=30, display="auto", audio=None)
+    # Force mac screen capture with auto screen selection; disable audio to avoid device conflicts
+    # Force screen capture device selection in code (macOS):
+    # Probe devices and pick the best match for the screen; otherwise fallback to index 1
+    tmp_recorder = ScreenRecorder(out_path=str(full_video), fps=30, display="auto", audio=None, platform="auto")
+    try:
+        vids, _ = tmp_recorder._list_avfoundation_devices()
+        # print(f"[DEBUG] Available AVFoundation video devices: {vids}")
+        # Prefer exact 'Capture screen 0', then names starting with 'Capture screen', then any containing 'screen'
+        screen_idx = None
+        for i, n in vids:
+            if n.strip().startswith("Capture screen 0"):
+                screen_idx = i
+                print(f"Selected screen capture device: '{n}' at index {i}")
+                break
+        if screen_idx is None:
+            for i, n in vids:
+                if n.strip().lower().startswith("capture screen"):
+                    screen_idx = i
+                    print(f"Selected screen capture device: '{n}' at index {i}")
+                    break
+        if screen_idx is None:
+            for i, n in vids:
+                if "screen" in n.lower():
+                    screen_idx = i
+                    print(f"Selected screen-like device: '{n}' at index {i}")
+                    break
+        if screen_idx is None:
+            screen_idx = 1
+            print(f"No screen device found, falling back to index {screen_idx}")
+        display_sel = screen_idx
+    except Exception as e:
+        print(f"Exception during device probing: {e}, using 'auto'")
+        display_sel = "auto"
+
+    print(f"Starting screen recording with device index: {display_sel}")
+    recorder = ScreenRecorder(out_path=str(full_video), fps=30, display=display_sel, audio=None, platform="auto")
     recorder.start()
 
     try:
@@ -86,30 +121,26 @@ async def main() -> None:
         trim_video(
             input_path=str(full_video),
             output_path=str(trimmed_video),
-<<<<<<< Updated upstream
-            mode='cut',
-            still_min_seconds=3.0,
-            frame_step=10,
-            warp_out_path=str(warp_json),
-            history_json_path=str(history_file),
-            remapped_history_path=str(remapped_history_json),
-=======
             mode='cap',
             still_min_seconds=1.0,
             cap_seconds=2.0,
             frame_step=4,
             diff_threshold=2,
-            # warp_out_path=str(warp_json),
-            # remapped_history_path=str(remapped_history_json),
->>>>>>> Stashed changes
+            warp_out_path=str(warp_json),
+            history_json_path=str(history_file),
+            remapped_history_path=str(remapped_history_json),
         )
     except Exception as e:
         print("Trimming failed:", e)
         return
 
     # 6) Generate transcript segments aligned to TRIMMED time ranges (use remapped history)
+    # Prefer remapped history; fall back to raw history if not present
+    history_for_transcript = remapped_history_json if remapped_history_json.exists() else history_file
+    if not remapped_history_json.exists():
+        print("Warning: remapped history not found; generating transcript from raw history.")
     try:
-        segments = generate_transcript_from_history(str(remapped_history_json))
+        segments = generate_transcript_from_history(str(history_for_transcript))
     except Exception as e:
         print("Transcript generation failed:", e)
         return

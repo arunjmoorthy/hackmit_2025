@@ -14,7 +14,12 @@ Spotlight transforms a simple web URL and task description into a professional d
 ### See It In Action
 Here's a real example of Spotlight in action - watch how it automatically creates a polished demo video from a simple GitHub URL:
 
-![Sample Demo Video](https://github.com/user-attachments/assets/1f320943-eec8-4541-9cf4-47fc130000ea.mp4)
+<div align="center">
+  <a href="https://github.com/user-attachments/assets/c00bbfc9-037a-41fc-8602-5b5cc24e7e49">
+    <img src="./frontend/src/assets/logo.png" alt="Demo video" width="400">
+  </a>
+  <p><em>Click to watch the demo video!</em></p>
+</div>
 
 *This demo shows Spotlight automatically navigating GitHub, signing in, and creating a new repository with an informative voiceover with voice cloning and background music.*
 
@@ -91,33 +96,26 @@ npm run dev
 
 ```bash
 cd ../backend
-python api.py
+uvicorn api:app --reload
 ```
 
-### 4. Open the App
-
-Navigate to `http://localhost:5173` and start creating demo videos!
-
-## 🎮 Usage
+## Usage
 
 ### Web Interface
 
 1. **Enter URL**: Provide the website you want to demo
 2. **Describe Task**: Tell the AI what actions to perform
-3. **Record Voice**: Provide a 10-20 second voice sample for cloning
-4. **Generate**: Watch the magic happen! Play Snake while you wait 🐍
+3. **Record Voice**: Provide a short clip voice sample for cloning
+4. **Generate**: Watch the magic happen! Play Snake while you wait
 
-### Command Line (Advanced)
+### Github Example Demonstration
 
 ```bash
-# Basic demo generation
-python main.py https://github.com "Sign in and create a new repository"
-
-# API server for production
-python api.py
+# Basic github demo generation
+python3 run_github_demo.py
 ```
 
-## 🔧 Configuration
+## Configuration
 
 ### Video Settings
 
@@ -172,7 +170,7 @@ hackmit_2025/
 - **Context awareness**: Understands page state and user intent
 
 ### Smart Video Editing
-- **Computer vision**: Detects static scenes for removal
+- **Detect Still Frames**: Detects static scenes for removal
 - **Timeline remapping**: Maintains accurate timestamps after cuts
 - **Adaptive trimming**: Preserves important action sequences
 

@@ -1,4 +1,4 @@
-# Sign in with email 'hacker41832@gmail.com' and password 'Hacker418'. Make a new repo with a random name. Then respond 'done' and stop.
+# Sign in with email 'hacker923121@gmail.com' and password 'ArunMoorthy123'. Make a new repo with a random name. Then respond 'done' and stop.
 import asyncio
 import json
 import os
@@ -24,7 +24,7 @@ from pydub import AudioSegment
 
 URL = "github.com"
 DESCRIPTION = (
-    "Sign in with email 'hacker41832@gmail.com' and password 'Hacker418'. "
+    "Sign in with email 'hacker923121@gmail.com' and password 'ArunMoorthy123'. "
     "Make a new repo with a random name. "
     # "Then, go to collaborators and invite a collaborator with the github username 'arunjmoorthy'. "
     "Then respond 'done' and stop."
